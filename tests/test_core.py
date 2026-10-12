@@ -173,6 +173,138 @@ def test_sync_with_versions():
     print("✓ Sync with real version storage works")
 
 
+def test_restore_and_view_file_content():
+    """Task 3: restore-content / view-content — контент версии куда угодно."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        t = Path(tmpdir)
+        f = t / "notes.md"
+        f.write_text("версия 1")
+        sync.sync(source=t)
+        f.write_text("версия 2 — длиннее")
+        sync.sync(source=t)
+        f.write_text("версия 3")
+        sync.sync(source=t)
+
+        assert len(sync.version_store.get_history("notes.md")) == 3
+
+        # restore-content в произвольный путь
+        out = t / "old.md"
+        ok, msg, info = sync.restore_file_content(str(f), version_index=0,
+                                                  output=str(out))
+        assert ok, msg
+        assert out.read_text() == "версия 1"
+        assert info["version_count"] == 3
+        assert info["dest_path"] == str(out)
+        assert not f.read_text() == "версия 1"  # оригинал не тронут
+
+        # restore-content без output → последняя версия
+        ok, msg, info = sync.restore_file_content(str(f))
+        assert ok and info["version_index"] == 2
+        assert f.read_text() == "версия 3"
+
+        # view-content читает, ничего не трогая
+        ok, msg, info = sync.view_file_content(str(f), version_index=1)
+        assert ok and info["data"].decode("utf-8") == "версия 2 — длиннее"
+        assert info["truncated"] is False
+
+        # --max-bytes режет контент по байтам, а не по символам
+        ok, msg, info = sync.view_file_content(str(f), version_index=1,
+                                               max_bytes=10)
+        assert ok and info["data"].decode("utf-8") == "верси"
+        assert info["truncated"] is True
+
+        # бинарник → restore-content, а не view
+        (t / "blob.bin").write_bytes(b"\x00\x01\x02\xff\xfe")
+        sync.sync(source=t)
+        ok, msg, info = sync.view_file_content(str(t / "blob.bin"))
+        assert ok  # данные отдаются, декодирует уже CLI
+
+        # нет истории → честная ошибка
+        ok, msg, info = sync.view_file_content(str(t / "нет-такого.txt"))
+        assert not ok and "No version history" in msg
+
+        # индекс вне диапазона
+        ok, msg, info = sync.restore_file_content(str(f), version_index=99)
+        assert not ok and "out of range" in msg
+    print("✓ restore-content / view-content работают с произвольными путями")
+
+
+def test_restore_tree_directory_and_profile():
+    """Task 3 Step 4: пакетное восстановление каталога и профиля."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        t = Path(tmpdir)
+        work = t / "work"          # источник — не каталог хранилища
+        src = work / "src"
+        (src / "docs").mkdir(parents=True)
+        (src / "a.txt").write_text("A1")
+        (src / "docs" / "b.txt").write_text("B1")
+        (work / "outside.txt").write_text("O1")
+        sync.sync(source=work)
+
+        # новые версии
+        (src / "a.txt").write_text("A2")
+        (src / "docs" / "b.txt").write_text("B2")
+        (work / "outside.txt").write_text("O2")
+        sync.sync(source=work)
+
+        assert sorted(sync.version_store.tracked_keys()) == [
+            "outside.txt", "src/a.txt", "src/docs/b.txt"]
+
+        # пакетное восстановление по префиксу в отдельный корень
+        out = t / "recovered"
+        res = sync.restore_tree(prefix="src", dest_root=out)
+        assert res["total"] == 2 and res["restored"] == 2 and res["failed"] == 0
+        assert (out / "src" / "a.txt").read_text() == "A2"
+        assert (out / "src" / "docs" / "b.txt").read_text() == "B2"
+        assert not (out / "outside.txt").exists()
+
+        # версия 0 для всех файлов дерева
+        out0 = t / "recovered0"
+        res = sync.restore_tree(prefix="src", dest_root=out0, version_index=0)
+        assert res["restored"] == 2
+        assert (out0 / "src" / "a.txt").read_text() == "A1"
+
+        # префикс без файлов → пустой результат, не ошибка
+        res = sync.restore_tree(prefix="нет-такого", dest_root=out0)
+        assert res["total"] == 0
+
+        # прогресс-колбэк вызывается на каждый файл
+        seen = []
+        sync.restore_tree(prefix="src", dest_root=t / "p",
+                          progress=lambda done, total, key: seen.append(
+                              (done, total, key)))
+        assert len(seen) == 2 and seen[-1][0] == 2 and seen[-1][1] == 2
+
+        # восстановление профиля — профиль ссылается на work/src/docs
+        from flamquency.profiles import create_profile, ensure_profiles
+        ensure_profiles(sync.config)
+        create_profile(sync.config, "docs", [str(src / "docs")])
+        outp = t / "by-profile"
+        res = sync.restore_profile("docs", dest_root=outp)
+        assert res["profile"] == "docs" and res["total"] == 1
+        assert (outp / "src" / "docs" / "b.txt").read_text() == "B2"
+    print("✓ restore-tree восстанавливает каталоги и профили")
+
+
+def test_diff_visual_summary():
+    """Task 3 Step 5: diff отдаёт unified-diff, который подсвечивает CLI."""
+    from flamquency.style import diff_text
+    diff = ("--- a/v0\n+++ b/v1\n@@ -1,2 +1,2 @@\n"
+            "-старая строка\n+новая строка\n контекст")
+    text = diff_text(diff)
+    plain = text.plain
+    assert "+новая строка" in plain and "-старая строка" in plain
+    # стили различаются: плюс — success, минус — error
+    styles = {s.style for s in text.spans}
+    assert "fq.success" in styles
+    assert "fq.error" in styles
+    assert "fq.warm" in styles  # @@ — тёплый ядро
+    assert "fq.accent" in styles  # ---/+++
+    print("✓ diff_text подсвечивает добавленные и удалённые строки")
+
+
 def test_rollback_snapshot():
     with tempfile.TemporaryDirectory() as tmpdir:
         sync = _isolated_sync(tmpdir)
@@ -1467,6 +1599,9 @@ def main():
         test_sync_with_versions,
         test_rollback_snapshot,
         test_rollback_file_real,
+        test_restore_and_view_file_content,
+        test_restore_tree_directory_and_profile,
+        test_diff_visual_summary,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,

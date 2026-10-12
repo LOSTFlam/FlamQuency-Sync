@@ -115,6 +115,8 @@ _GLYPHS = {
     "flag":       "\uf024",  # f024 — флаг
     "flag-checkered": "\uf11e",  # f11e — финиш
     "trophy":     "\uf091",  # f091 — трофей
+    "plus":       "\uf067",  # f067 — добавлено (+ в diff)
+    "minus":      "\uf068",  # f068 — удалено (− в diff)
 }
 
 # ── ASCII-fallback — когда Nerd Font не установлен ──
@@ -148,6 +150,7 @@ _FALLBACK = {
     "focus": "*",
     "target": "()", "flag": "!", "flag-checkered": "!",
     "trophy": "T",
+    "plus": "+", "minus": "-",
 }
 
 

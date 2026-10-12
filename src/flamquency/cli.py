@@ -7,6 +7,10 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+from rich.panel import Panel
+from rich.text import Text
+from rich import box
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from flamquency.sync_engine import FlamQuencySync
@@ -21,7 +25,7 @@ from flamquency.profiles import ProfileError
 from flamquency.style import (
     get_console, banner, header, card, success_panel, error_panel,
     warning_panel, info_panel, key_value, make_table, fire_progress,
-    human_size, human_time,
+    human_size, human_time, PALETTE, diff_text,
 )
 from flamquency.icons import icon
 from flamquency.updater import check_for_update, perform_update
@@ -233,6 +237,216 @@ def cmd_rollback_file(args):
     return 1
 
 
+def cmd_restore_content(args):
+    """Restore the *content* of a specific version to any path."""
+    console = get_console()
+    try:
+        sync = get_sync_engine(password=getattr(args, "password", None))
+    except (WrongPasswordError, EncryptionError) as e:
+        console.print(error_panel(console, str(e), title="Хранилище зашифровано",
+                                  icon_name="lock"))
+        return 1
+
+    filepath = Path(args.file).expanduser()
+    output = Path(args.output).expanduser() if args.output else None
+
+    if args.list:
+        success, info = sync.rollback_file(str(filepath))
+        if not success or not isinstance(info, dict):
+            console.print(error_panel(console, str(info)))
+            return 1
+        rows = [
+            (v["index"], v["timestamp"][:19].replace("T", " "),
+             v["hash"][:12], human_size(v["size"]))
+            for v in info["versions"]
+        ]
+        console.print(card(
+            console, make_table(["Версия", "Время", "Хеш", "Размер"], rows),
+            title=f"{icon('restore')} {info['rel_path']} — "
+                  f"{info['version_count']} версий"))
+        console.print(f"[fq.faint]Восстановить содержимое: "
+                      f"flamquency restore-content {args.file} --version N "
+                      f"[--output ПУТЬ][/]")
+        return 0
+
+    try:
+        success, msg, info = sync.restore_file_content(
+            str(filepath), version_index=args.version, output=output)
+    except (EncryptionLockedError, DecryptionError) as e:
+        console.print(error_panel(console, str(e), icon_name="lock"))
+        return 1
+
+    if success:
+        body = msg
+        body += (f"\nХеш: {info['hash'][:12]}... · "
+                 f"размер: {human_size(info['size'])} · "
+                 f"версий всего: {info['version_count']}")
+        console.print(success_panel(console, body,
+                                    title="Содержимое восстановлено",
+                                    icon_name="restore"))
+        return 0
+    console.print(error_panel(console, msg, icon_name="error"))
+    return 1
+
+
+def cmd_view_content(args):
+    """View the content of a specific version (without restoring it)."""
+    console = get_console()
+    try:
+        sync = get_sync_engine(password=getattr(args, "password", None))
+    except (WrongPasswordError, EncryptionError) as e:
+        console.print(error_panel(console, str(e), title="Хранилище зашифровано",
+                                  icon_name="lock"))
+        return 1
+
+    filepath = Path(args.file).expanduser()
+
+    if args.list:
+        success, info = sync.rollback_file(str(filepath))
+        if not success or not isinstance(info, dict):
+            console.print(error_panel(console, str(info)))
+            return 1
+        rows = [
+            (v["index"], v["timestamp"][:19].replace("T", " "),
+             v["hash"][:12], human_size(v["size"]))
+            for v in info["versions"]
+        ]
+        console.print(card(
+            console, make_table(["Версия", "Время", "Хеш", "Размер"], rows),
+            title=f"{icon('content')} {info['rel_path']} — "
+                  f"{info['version_count']} версий"))
+        return 0
+
+    try:
+        success, msg, info = sync.view_file_content(
+            str(filepath), version_index=args.version, max_bytes=args.max_bytes)
+    except (EncryptionLockedError, DecryptionError) as e:
+        console.print(error_panel(console, str(e), icon_name="lock"))
+        return 1
+
+    if not success:
+        console.print(error_panel(console, msg, icon_name="error"))
+        return 1
+
+    meta = Text()
+    meta.append(f"{icon('content')} {msg}\n", style="fq.label")
+    meta.append(f"хеш: {info['hash'][:12]}... · версий всего: "
+                f"{info['version_count']}", style="fq.faint")
+    console.print(card(console, meta, title="Версия файла"))
+
+    data = info["data"]
+    try:
+        text = data.decode("utf-8")
+        if text:
+            console.print(Panel(text.rstrip(),
+                                box=box.SIMPLE_HEAD,
+                                border_style=PALETTE["accent-deep"],
+                                padding=(1, 2)))
+        else:
+            console.print("[fq.faint](файл пуст)[/]")
+    except UnicodeDecodeError:
+        console.print(warning_panel(
+            console,
+            "Это двоичный файл. Восстановите его через "
+            "flamquency restore-content --output ПУТЬ.",
+            title="Бинарное содержимое", icon_name="warning"))
+    if info["truncated"]:
+        console.print(f"[fq.faint]…показаны первые "
+                      f"{human_size(args.max_bytes)} из {human_size(info['size'])} "
+                      f"(--max-bytes чтобы увеличить)[/]")
+    return 0
+
+
+def cmd_restore_tree(args):
+    """Restore a whole directory / the whole store / a profile at one version."""
+    console = get_console()
+    try:
+        sync = get_sync_engine(password=getattr(args, "password", None))
+    except (WrongPasswordError, EncryptionError) as e:
+        console.print(error_panel(console, str(e), title="Хранилище зашифровано",
+                                  icon_name="lock"))
+        return 1
+
+    dest_root = Path(args.output).expanduser() if args.output else None
+
+    if args.list:
+        keys = sync.version_store.tracked_keys()
+        if not keys:
+            console.print(warning_panel(
+                console, "В хранилище нет отслеживаемых файлов.",
+                title="Пусто", icon_name="warning"))
+            return 0
+        rows = [(i + 1, k) for i, k in enumerate(keys)]
+        console.print(card(
+            console, make_table(["#", "Файл в хранилище"], rows),
+            title=f"{icon('folder')} {len(keys)} отслеживаемых файлов"))
+        console.print("[fq.faint]Восстановить всё: flamquency restore-tree "
+                      "[--output ПУТЬ] · каталог: restore-tree ПУТЬ[/]")
+        return 0
+
+    if args.profile:
+        from flamquency.profiles import ProfileError
+        try:
+            result = sync.restore_profile(
+                args.profile, version_index=args.version,
+                dest_root=dest_root, progress=_tree_progress(console))
+        except ProfileError as e:
+            console.print(error_panel(console, str(e)))
+            return 1
+        scope = f"профиль «{args.profile}»"
+    else:
+        prefix = Path(args.path).expanduser() if args.path else None
+        result = sync.restore_tree(
+            prefix=prefix, dest_root=dest_root, version_index=args.version,
+            progress=_tree_progress(console))
+        scope = str(prefix) if prefix else "всё хранилище"
+
+    if not result["total"]:
+        console.print(warning_panel(
+            console, f"Под «{scope}» нет файлов с версиями.",
+            title="Нечего восстанавливать", icon_name="warning"))
+        return 1
+
+    body = (f"Восстановлено {result['restored']} из {result['total']}"
+            + (f", ошибок: {result['failed']}" if result["failed"] else "")
+            + f"\nОбласть: {scope}"
+            + (f"\nКорень: {dest_root}" if dest_root else "\nКорень: исходные пути"))
+    panel = (success_panel if not result["failed"] else warning_panel)(
+        console, body, title="Восстановление завершено", icon_name="restore")
+    console.print(panel)
+
+    if args.verbose:
+        rows = [(f["rel_path"], f.get("dest") or "—",
+                 human_size(_safe_size(f["rel_path"], sync)))
+                for f in result["files"]]
+        console.print(card(console, make_table(
+            ["Файл", "Куда", "Размер"], rows), title="Что восстановлено"))
+    return 0 if not result["failed"] else 1
+
+
+def _safe_size(rel_path, sync):
+    info = sync.version_store.blob_store._index.get(
+        sync.version_store.get_history(rel_path)[-1]["hash"], {})
+    return info.get("size", 0)
+
+
+def _tree_progress(console):
+    """Прогресс-колбэк восстановления: огненный прогресс-бар."""
+    state = {}
+
+    def cb(done, total, rel_path):
+        if "bar" not in state:
+            state["bar"] = fire_progress(console, "Восстановление")
+            state["bar"].start()
+            state["task"] = state["bar"].add_task("restore", total=total)
+        state["bar"].update(state["task"], completed=done,
+                            description=f"Восстановление: {rel_path}")
+        if done >= total:
+            state["bar"].stop()
+
+    return cb
+
+
 def cmd_status(args):
     """Show sync status."""
     console = get_console()
@@ -285,10 +499,16 @@ def cmd_diff(args):
         console.print(error_panel(console, str(diff)))
         return 1
 
-    console.print(card(console, Text(diff, style="fq.body"),
+    console.print(card(console, diff_text(diff),
                        title=f"{icon('eye')} {filepath.name}: "
                              f"v{args.v1} → v{args.v2}",
                        icon_name="eye"))
+    added = sum(1 for l in diff.splitlines() if l.startswith("+")
+                and not l.startswith("+++"))
+    removed = sum(1 for l in diff.splitlines() if l.startswith("-")
+                  and not l.startswith("---"))
+    console.print(f"[fq.faint]{icon('plus')} {added} добавлено · "
+                  f"{icon('minus')} {removed} удалено[/]")
     return 0
 
 
@@ -955,6 +1175,48 @@ def main():
     p_rbf.add_argument("--version", "-v", type=int, help="Version index")
     p_rbf.add_argument("--list", "-l", action="store_true", help="List versions")
     
+    # restore-content
+    p_rc = subparsers.add_parser(
+        "restore-content",
+        help="Restore the content of a specific version to any path")
+    p_rc.add_argument("file", help="File path (as tracked in the store)")
+    p_rc.add_argument("--version", "-v", type=int,
+                      help="Version index (default: latest)")
+    p_rc.add_argument("--output", "-o", metavar="PATH",
+                      help="Destination path (default: original location)")
+    p_rc.add_argument("--list", "-l", action="store_true", help="List versions")
+    p_rc.add_argument("--password", "-p", help="Blob store password")
+
+    # view-content
+    p_vc = subparsers.add_parser(
+        "view-content",
+        help="Print the content of a specific version (no restore)")
+    p_vc.add_argument("file", help="File path (as tracked in the store)")
+    p_vc.add_argument("--version", "-v", type=int,
+                      help="Version index (default: latest)")
+    p_vc.add_argument("--max-bytes", type=int, default=1_048_576,
+                      metavar="N", help="Content cap in bytes (default: 1 MiB)")
+    p_vc.add_argument("--list", "-l", action="store_true", help="List versions")
+    p_vc.add_argument("--password", "-p", help="Blob store password")
+
+    # restore-tree
+    p_rt = subparsers.add_parser(
+        "restore-tree",
+        help="Restore a whole directory, a profile, or the entire store")
+    p_rt.add_argument("path", nargs="?",
+                      help="Directory prefix to restore (default: everything)")
+    p_rt.add_argument("--profile", "-P", metavar="NAME",
+                      help="Restore only files belonging to this profile")
+    p_rt.add_argument("--version", "-v", type=int,
+                      help="Version index per file (default: latest of each)")
+    p_rt.add_argument("--output", "-o", metavar="DIR",
+                      help="Root the files are restored under")
+    p_rt.add_argument("--list", "-l", action="store_true",
+                      help="List tracked files instead of restoring")
+    p_rt.add_argument("--verbose", action="store_true",
+                      help="Print a table of restored files")
+    p_rt.add_argument("--password", "-p", help="Blob store password")
+
     # status
     subparsers.add_parser("status", help="Show sync status")
     
@@ -1072,6 +1334,9 @@ def main():
         "sync": cmd_sync,
         "rollback": cmd_rollback,
         "rollback-file": cmd_rollback_file,
+        "restore-content": cmd_restore_content,
+        "view-content": cmd_view_content,
+        "restore-tree": cmd_restore_tree,
         "status": cmd_status,
         "diff": cmd_diff,
         "snapshots": cmd_snapshots,

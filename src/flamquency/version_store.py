@@ -339,6 +339,170 @@ class VersionStore:
             return True, f"Restored {rel_path} to version {version_index} (hash: {hash_hex[:12]}...)"
         return False, f"Blob {hash_hex[:12]}... not found in store"
 
+    def restore_file_content(self, rel_path, version_index=None, dest_path=None):
+        """Restore the *content* of a specific version to any destination.
+
+        Unlike :meth:`restore_version`, this method supports an explicit
+        ``dest_path`` (restoring to any location, not only the original)
+        and returns richer information about the restored content.
+
+        Parameters
+        ----------
+        rel_path:
+            Path key used when the version was recorded.
+        version_index:
+            Which version to restore. ``None`` restores the latest.
+        dest_path:
+            Where to write the content. ``None`` restores to the original
+            location (``~ / rel_path``) — same as ``restore_version``.
+
+        Returns
+        -------
+        (ok: bool, message: str, info: dict)
+            ``info`` carries ``hash``, ``size``, ``version_index``,
+            ``version_count`` and ``dest_path`` (as ``str``).
+        """
+        history = self._load_history(rel_path)
+        if not history:
+            return False, "No version history found", {}
+
+        if version_index is None:
+            version_index = len(history) - 1
+
+        if version_index < 0 or version_index >= len(history):
+            return False, f"Version index {version_index} out of range (0-{len(history)-1})", {}
+
+        hash_hex = history[version_index]["hash"]
+
+        if dest_path is None:
+            dest_path = Path.home() / rel_path
+        dest_path = Path(dest_path)
+
+        success = self.blob_store.restore_to(hash_hex, dest_path)
+        if not success:
+            return False, f"Blob {hash_hex[:12]}... not found in store", {}
+
+        info = {
+            "hash": hash_hex,
+            "size": self.blob_store._index.get(hash_hex, {}).get("size", "?"),
+            "version_index": version_index,
+            "version_count": len(history),
+            "dest_path": str(dest_path),
+        }
+        return True, (
+            f"Restored content of {rel_path} (version {version_index}/"
+            f"{len(history)-1}, {info['size']} B) to {dest_path}"
+        ), info
+
+    def view_file_content(self, rel_path, version_index=None, max_bytes=1_048_576):
+        """Return the *content* of a version without restoring anything.
+
+        Parameters
+        ----------
+        rel_path:
+            Path key used when the version was recorded.
+        version_index:
+            Which version to read. ``None`` reads the latest.
+        max_bytes:
+            Hard cap on the returned content (1 MiB by default) to keep
+            ``view-content`` from flooding the terminal with huge blobs.
+
+        Returns
+        -------
+        (ok: bool, message: str, info: dict)
+            ``info`` carries ``data`` (bytes), ``hash``, ``size``,
+            ``version_index``, ``version_count`` and ``truncated``.
+        """
+        history = self._load_history(rel_path)
+        if not history:
+            return False, "No version history found", {}
+
+        if version_index is None:
+            version_index = len(history) - 1
+
+        if version_index < 0 or version_index >= len(history):
+            return False, f"Version index {version_index} out of range (0-{len(history)-1})", {}
+
+        hash_hex = history[version_index]["hash"]
+        data = self.blob_store.retrieve(hash_hex)
+        if data is None:
+            return False, f"Blob {hash_hex[:12]}... not found in store", {}
+
+        truncated = len(data) > max_bytes
+        info = {
+            "data": data[:max_bytes],
+            "hash": hash_hex,
+            "size": len(data),
+            "version_index": version_index,
+            "version_count": len(history),
+            "truncated": truncated,
+        }
+        msg = f"{rel_path} version {version_index}/{len(history)-1} ({info['size']} B)"
+        if truncated:
+            msg += f" — truncated to {max_bytes} B"
+        return True, msg, info
+
+    def tracked_keys(self):
+        """All rel_path keys that have a version history."""
+        if not self.versions_dir.exists():
+            return []
+        keys = []
+        for vp in self.versions_dir.glob("*.json"):
+            try:
+                if json.loads(vp.read_text()):
+                    keys.append(vp.stem.replace("__", "/"))
+            except Exception:
+                continue
+        return sorted(keys)
+
+    def restore_tree(self, prefix=None, dest_root=None, version_index=None,
+                     progress=None):
+        """Restore every tracked file under *prefix* at one version index.
+
+        Parameters
+        ----------
+        prefix:
+            Restrict to keys starting with this path (``None`` = everything).
+        dest_root:
+            Root the keys are restored under. ``None`` restores each file to
+            its original location (``~ / rel_path``).
+        version_index:
+            Version to restore per file. ``None`` = the latest of each file.
+        progress:
+            Optional ``callable(done, total, rel_path)``.
+
+        Returns
+        -------
+        dict with ``restored``, ``failed``, ``total`` and ``files``.
+        """
+        keys = self.tracked_keys()
+        if prefix:
+            prefix = str(prefix).replace("\\", "/").rstrip("/")
+            keys = [k for k in keys
+                    if k == prefix or k.startswith(prefix + "/")]
+        if not keys:
+            return {"restored": 0, "failed": 0, "total": 0, "files": []}
+
+        restored, failed, files = 0, 0, []
+        for done, key in enumerate(keys, 1):
+            ok, msg, info = self.restore_file_content(
+                key, version_index=version_index,
+                dest_path=(Path(dest_root) / key) if dest_root else None,
+            )
+            if ok:
+                restored += 1
+                files.append({"rel_path": key, "dest": info.get("dest_path"),
+                              "version_index": info.get("version_index")})
+            else:
+                failed += 1
+            if progress:
+                try:
+                    progress(done, len(keys), key)
+                except Exception:
+                    pass
+        return {"restored": restored, "failed": failed,
+                "total": len(keys), "files": files}
+
     def diff_versions(self, rel_path, v1, v2):
         """Compare two versions of a file (text files only)."""
         history = self._load_history(rel_path)

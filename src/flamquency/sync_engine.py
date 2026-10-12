@@ -557,6 +557,103 @@ class FlamQuencySync:
             return False, "Could not diff versions"
         return True, diff
 
+    def restore_file_content(self, file_path, version_index=None, output=None):
+        """Restore the *content* of a version to any path (not just the original)."""
+        rel_str = self._find_rel_path(file_path)
+        return self.version_store.restore_file_content(
+            rel_str, version_index=version_index, dest_path=output)
+
+    def view_file_content(self, file_path, version_index=None, max_bytes=1_048_576):
+        """Read a version's content without restoring it."""
+        rel_str = self._find_rel_path(file_path)
+        return self.version_store.view_file_content(
+            rel_str, version_index=version_index, max_bytes=max_bytes)
+
+    def restore_tree(self, prefix=None, dest_root=None, version_index=None,
+                     progress=None):
+        """Restore a whole directory / the whole store at one version.
+
+        ``prefix`` restricts the restore to tracked keys under that path;
+        omit it to restore everything. ``dest_root`` redirects the output
+        tree (handy for a dry look before touching real files).
+        """
+        return self.version_store.restore_tree(
+            prefix=prefix, dest_root=dest_root,
+            version_index=version_index, progress=progress)
+
+    def restore_profile(self, profile_name=None, version_index=None,
+                        dest_root=None, progress=None):
+        """Restore every tracked file that lives under a profile's paths.
+
+        Ключи хранилища — пути *относительно синхронизированного корня*, а не
+        абсолютные, поэтому сопоставление эвристическое: ключ подходит профилю,
+        если он (а) совпадает с абсолютным или home-относительным путём корня
+        или лежит под ним, либо (б) хвостовые компоненты пути корня образуют
+        непрерывный фрагмент в начале или в конце компонентов ключа.
+
+        Ограничение: если файлы синхронизировались с корнем, равным самому
+        пути профиля, ключи — голые имена, и такой профиль неотличим от
+        любого другого; для этого случая используйте ``restore-tree``.
+        """
+        from flamquency.profiles import (
+            ensure_profiles, get_profile, profile_paths, active_name,
+        )
+        ensure_profiles(self.config)
+        name = profile_name or active_name(self.config)
+        get_profile(self.config, name)  # raises ProfileError if unknown
+
+        keys = self.version_store.tracked_keys()
+        roots = [Path(p) for p in profile_paths(self.config, name)]
+        home = Path.home()
+
+        def matches(key):
+            kparts = tuple(Path(key).parts)
+            for root in roots:
+                rparts = tuple(root.parts)
+                # (а) абсолютный путь или путь под ним
+                if key == str(root) or key.startswith(str(root).rstrip("/") + "/"):
+                    return True
+                # home-относительная форма корня
+                try:
+                    home_rel = str(root.relative_to(home))
+                except ValueError:
+                    home_rel = None
+                if home_rel and (key == home_rel
+                                 or key.startswith(home_rel + "/")):
+                    return True
+                # (б) хвостовой фрагмент компонентов корня
+                for size in range(min(len(rparts), len(kparts)), 0, -1):
+                    run = rparts[-size:]
+                    if run and (kparts[:size] == run or kparts[-size:] == run):
+                        return True
+            return False
+
+        matched = [k for k in keys if matches(k)]
+        if not matched:
+            return {"restored": 0, "failed": 0, "total": 0,
+                    "files": [], "profile": name}
+
+        result = {"restored": 0, "failed": 0,
+                  "total": len(matched), "files": [], "profile": name}
+        for key in matched:
+            ok, msg, info = self.version_store.restore_file_content(
+                key, version_index=version_index,
+                dest_path=(Path(dest_root) / key) if dest_root else None)
+            if ok:
+                result["restored"] += 1
+                result["files"].append({
+                    "rel_path": key, "dest": info.get("dest_path"),
+                    "version_index": info.get("version_index")})
+            else:
+                result["failed"] += 1
+            if progress:
+                try:
+                    progress(result["restored"] + result["failed"],
+                             len(matched), key)
+                except Exception:
+                    pass
+        return result
+
     def list_snapshots(self):
         snapshots = []
         if self.snapshot_dir.exists():

@@ -210,6 +210,29 @@ def info_panel(console, content, title=None, icon_name="info"):
     )
 
 
+def diff_text(diff):
+    """Unified diff → Rich Text с подсветкой «Угольки».
+
+    + строки — success (пламя роста), - — error, @@/---/+++ — accent.
+    Не текст diff (бинарник, пусто) возвращается как есть.
+    """
+    text = Text()
+    for i, line in enumerate(str(diff).splitlines()):
+        if i:
+            text.append("\n")
+        if line.startswith("+++") or line.startswith("---"):
+            text.append(line, style="fq.accent")
+        elif line.startswith("@@"):
+            text.append(line, style="fq.warm")
+        elif line.startswith("+"):
+            text.append(line, style="fq.success")
+        elif line.startswith("-"):
+            text.append(line, style="fq.error")
+        else:
+            text.append(line, style="fq.faint")
+    return text
+
+
 def key_value(pairs, key_style="fq.label", value_style="fq.body"):
     """Строки «ключ: значение» — для статуса и настроек."""
     table = Table(show_header=False, box=None, padding=(0, 2))
