@@ -9,33 +9,28 @@ class CloudBackend(ABC):
     
     @abstractmethod
     def authenticate(self):
-        """Authenticate with the cloud service."""
         pass
     
     @abstractmethod
     def upload(self, local_path, remote_path):
-        """Upload a file or directory to cloud."""
         pass
     
     @abstractmethod
     def download(self, remote_path, local_path):
-        """Download a file or directory from cloud."""
         pass
     
     @abstractmethod
     def list_remote(self, remote_path):
-        """List remote files."""
         pass
     
     @abstractmethod
     def delete_remote(self, remote_path):
-        """Delete a file from cloud."""
         pass
     
     @abstractmethod
     def get_status(self):
-        """Get current cloud sync status."""
         pass
+
 
 class LocalBackend(CloudBackend):
     """Local file storage backend."""
@@ -47,11 +42,9 @@ class LocalBackend(CloudBackend):
         self.base_path.mkdir(parents=True, exist_ok=True)
     
     def authenticate(self):
-        """Local backend requires no authentication."""
         return True
     
     def upload(self, local_path, remote_path):
-        """Copy to local sync directory."""
         remote = self.base_path / remote_path
         if local_path.is_dir():
             remote.mkdir(parents=True, exist_ok=True)
@@ -67,7 +60,6 @@ class LocalBackend(CloudBackend):
         return True
     
     def download(self, remote_path, local_path):
-        """Copy from local sync directory."""
         remote = self.base_path / remote_path
         if remote.is_dir():
             local_path.mkdir(parents=True, exist_ok=True)
@@ -83,14 +75,12 @@ class LocalBackend(CloudBackend):
         return True
     
     def list_remote(self, remote_path):
-        """List files in local sync directory."""
         remote = self.base_path / remote_path
         if remote.exists():
             return [f.relative_to(remote) for f in remote.rglob('*') if f.is_file()]
         return []
     
     def delete_remote(self, remote_path):
-        """Remove from local sync directory."""
         remote = self.base_path / remote_path
         if remote.exists():
             if remote.is_file():
@@ -103,7 +93,6 @@ class LocalBackend(CloudBackend):
         return False
     
     def get_status(self):
-        """Get local sync status."""
         if self.base_path.exists():
             return {
                 "backend": "local",
@@ -112,15 +101,70 @@ class LocalBackend(CloudBackend):
             }
         return {"backend": "local", "base_path": str(self.base_path), "synced_items": 0}
 
+
+class GitHubBackend(CloudBackend):
+    """GitHub repository backend (stub for now)."""
+    def __init__(self, repo_name=None, token=None):
+        self.repo_name = repo_name
+        self.token = token
+        self.repo = None
+    
+    def authenticate(self):
+        try:
+            import subprocess
+            result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def upload(self, local_path, remote_path):
+        return True
+    
+    def download(self, remote_path, local_path):
+        return True
+    
+    def list_remote(self, remote_path):
+        return []
+    
+    def delete_remote(self, remote_path):
+        return True
+    
+    def get_status(self):
+        return {"backend": "github", "repo": self.repo_name, "status": "stub"}
+
+
+class GoogleDriveBackend(CloudBackend):
+    """Google Drive backend (stub for now)."""
+    def __init__(self, credentials_path=None):
+        self.credentials_path = credentials_path
+        self.service = None
+    
+    def authenticate(self):
+        return False  # Not implemented yet
+    
+    def upload(self, local_path, remote_path):
+        return True
+    
+    def download(self, remote_path, local_path):
+        return True
+    
+    def list_remote(self, remote_path):
+        return []
+    
+    def delete_remote(self, remote_path):
+        return True
+    
+    def get_status(self):
+        return {"backend": "google_drive", "status": "stub"}
+
+
 def get_backend(backend_type, **kwargs):
     """Factory function to create cloud backend."""
     if backend_type == "local":
         return LocalBackend(kwargs.get('base_path'))
     elif backend_type == "github":
-        from flamquency.cloud import GitHubBackend
         return GitHubBackend(kwargs.get('repo_name'), kwargs.get('token'))
     elif backend_type == "google_drive":
-        from flamquency.cloud import GoogleDriveBackend
         return GoogleDriveBackend(kwargs.get('credentials_path'))
     else:
         return LocalBackend()
