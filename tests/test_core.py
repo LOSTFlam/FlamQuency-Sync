@@ -1396,7 +1396,7 @@ def test_icons_fallback_when_no_font():
     force = icon("fire", force_font=False)
     assert force == "🔥"  # ASCII-fallback для fire — огонь читается и так
     nerd = icon("fire", force_font=True)
-    assert nerd == "\uf0e7"
+    assert nerd == "\uf06d"  # f06d — fire в Nerd Font
     print("✓ icons fall back to ASCII when Nerd Font missing")
 
 
