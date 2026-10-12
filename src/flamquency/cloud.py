@@ -93,143 +93,34 @@ class LocalBackend(CloudBackend):
         """Remove from local sync directory."""
         remote = self.base_path / remote_path
         if remote.exists():
-            remote.unlink() if remote.is_file() else self._rmtree(remote)
+            if remote.is_file():
+                remote.unlink()
+            else:
+                for item in remote.rglob('*'):
+                    item.unlink()
+                remote.rmdir()
             return True
         return False
     
-    def _rmtree(self, path):
-        """Remove directory tree."""
-        for item in path.rglob('*'):
-            item.unlink() if item.is_file() else None
-        path.rmdir()
-    
     def get_status(self):
         """Get local sync status."""
-        return {
-            "backend": "local",
-            "base_path": str(self.base_path),
-            "synced_items": len(list(self.base_path.rglob('*'))) if self.base_path.exists() else 0,
-        }
-
-class GitHubBackend(CloudBackend):
-    """GitHub repository backend."""
-    
-    def __init__(self, repo_name=None, token=None):
-        self.repo_name = repo_name
-        self.token = token
-        self.github = None
-        self.repo = None
-    
-    def authenticate(self):
-        """Authenticate with GitHub using token."""
-        try:
-            import ghapi
-            self.github = ghapi.GitHub(self.token)
-            return True
-        except ImportError:
-            # Try git remote approach
-            return False
-    
-    def _ensure_repo(self, username):
-        """Create or find the FlamQuency sync repo."""
-        import subprocess
-        # Check if repo exists
-        try:
-            result = subprocess.run(
-                ['gh', 'repo', 'view', self.repo_name],
-                capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                self.repo = self.repo_name
-                return True
-        except:
-            pass
-        
-        # Create new repo
-        try:
-            subprocess.run(
-                ['gh', 'repo', 'create', self.repo_name,
-                 '--private', '--source', '.',
-                 '--push'],
-                capture_output=True, text=True, cwd=Path.home()
-            )
-            self.repo = self.repo_name
-            return True
-        except Exception as e:
-            print(f"GitHub repo creation failed: {e}")
-            return False
-    
-    def upload(self, local_path, remote_path):
-        """Upload via git."""
-        # This is simplified - real implementation would use git operations
-        print(f"GitHub upload: {local_path} -> {remote_path}")
-        return True
-    
-    def download(self, remote_path, local_path):
-        """Download via git pull."""
-        print(f"GitHub download: {remote_path} -> {local_path}")
-        return True
-    
-    def list_remote(self, remote_path):
-        """List git repo contents."""
-        return []
-    
-    def delete_remote(self, remote_path):
-        """Delete from git."""
-        return True
-    
-    def get_status(self):
-        """Get GitHub sync status."""
-        return {
-            "backend": "github",
-            "repo": self.repo_name,
-            "status": "not_implemented",
-        }
-
-class GoogleDriveBackend(CloudBackend):
-    """Google Drive backend (simplified)."""
-    
-    def __init__(self, credentials_path=None):
-        self.credentials_path = credentials_path
-        self.service = None
-    
-    def authenticate(self):
-        """Authenticate with Google Drive via OAuth."""
-        print("Google Drive OAuth flow would start here...")
-        return False  # Simplified for now
-    
-    def upload(self, local_path, remote_path):
-        """Upload to Google Drive."""
-        print(f"Google Drive upload: {local_path} -> {remote_path}")
-        return True
-    
-    def download(self, remote_path, local_path):
-        """Download from Google Drive."""
-        print(f"Google Drive download: {remote_path} -> {local_path}")
-        return True
-    
-    def list_remote(self, remote_path):
-        """List Google Drive files."""
-        return []
-    
-    def delete_remote(self, remote_path):
-        """Delete from Google Drive."""
-        return True
-    
-    def get_status(self):
-        """Get Google Drive status."""
-        return {
-            "backend": "google_drive",
-            "status": "not_implemented",
-        }
+        if self.base_path.exists():
+            return {
+                "backend": "local",
+                "base_path": str(self.base_path),
+                "synced_items": len(list(self.base_path.rglob('*'))),
+            }
+        return {"backend": "local", "base_path": str(self.base_path), "synced_items": 0}
 
 def get_backend(backend_type, **kwargs):
     """Factory function to create cloud backend."""
     if backend_type == "local":
         return LocalBackend(kwargs.get('base_path'))
     elif backend_type == "github":
+        from flamquency.cloud import GitHubBackend
         return GitHubBackend(kwargs.get('repo_name'), kwargs.get('token'))
     elif backend_type == "google_drive":
+        from flamquency.cloud import GoogleDriveBackend
         return GoogleDriveBackend(kwargs.get('credentials_path'))
     else:
         return LocalBackend()

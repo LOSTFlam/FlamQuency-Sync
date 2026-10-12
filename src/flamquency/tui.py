@@ -1,11 +1,10 @@
 """Terminal User Interface for FlamQuency-Sync using Rich."""
 import sys
+import time
 from datetime import datetime
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.progress import Progress, BarColumn, TextColumn
-from rich.layout import Layout
 from rich.text import Text
 
 console = Console()
@@ -62,6 +61,7 @@ class FlamQuencyTUI:
         
         panel = Panel(table, title=" Main Menu ", border_style="blue")
         console.print(panel)
+        console.print()
     
     def draw_sync_options(self):
         """Draw sync configuration options."""
@@ -133,7 +133,7 @@ class FlamQuencyTUI:
         else:
             table.add_row("System Snapshots:", "No snapshots found")
         
-        table.add_row("Per-File Versions:", version_info[:50] if version_info else "")
+        table.add_row("Per-File Versions:", str(version_info)[:50] if version_info else "")
         
         panel = Panel(table, title=" Rollback Options ", border_style="red")
         console.print(panel)
@@ -147,18 +147,116 @@ class FlamQuencyTUI:
         panel2 = Panel(table2, title=" Actions ", border_style="red")
         console.print(panel2)
     
+    def handle_input(self, choice):
+        """Handle menu selection."""
+        if choice == "1":
+            self.do_sync()
+        elif choice == "2":
+            self.do_rollback()
+        elif choice == "3":
+            self.do_settings()
+        elif choice == "4":
+            self.do_about()
+        elif choice == "5":
+            self.running = False
+            console.clear()
+            console.print("Goodbye! ✨")
+            time.sleep(0.5)
+            sys.exit(0)
+        else:
+            console.print("[red]Invalid choice, please try again.[/red]")
+            time.sleep(1)
+    
+    def do_sync(self):
+        """Execute synchronization."""
+        console.print("[cyan]Starting sync...[/cyan]")
+        result = self.sync.sync()
+        
+        console.print(f"[green]Sync complete![/green]")
+        console.print(f"Files synced: {result.files_synced}")
+        console.print(f"Files changed: {result.files_changed}")
+        console.print(f"Files excluded: {result.files_excluded}")
+        if result.errors:
+            console.print(f"Errors: {len(result.errors)}")
+            for e in result.errors[:3]:
+                console.print(f"  - {e}")
+        
+        # Wait for user
+        console.print("\nPress Enter to return to menu...")
+        input()
+    
+    def do_rollback(self):
+        """Show rollback options."""
+        self.draw_rollback_menu()
+        console.print("\nSelect rollback type:")
+        console.print("1. Full system snapshot")
+        console.print("2. Per-file version")
+        console.print("0. Cancel")
+        
+        choice = input("> ")
+        if choice == "1":
+            snapshots_dir = self.sync.snapshot_dir
+            if snapshots_dir.exists():
+                snapshots = sorted(snapshots_dir.iterdir(), key=lambda p: p.name)
+                snapshots = [p.name for p in snapshots if p.is_dir() and p.name.startswith("snapshot_")]
+                if snapshots:
+                    # Show last 3
+                    for i, s in enumerate(snapshots[-3:], 1):
+                        date = s.replace("snapshot_", "").replace("_", " ")[:16]
+                        console.print(f"{i}. {date}")
+                    
+                    sel = input("Select snapshot (number): ")
+                    try:
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(snapshots[-3:]):
+                            success, msg = self.sync.rollback_to_snapshot(snapshots[-3:][idx])
+                            console.print(f"[{'green' if success else 'red'}] {msg} [/]")
+                    except:
+                        pass
+                else:
+                    console.print("[red]No snapshots available[/red]")
+            else:
+                console.print("[red]No snapshots directory[/red]")
+            input("\nPress Enter to return...")
+        elif choice == "2":
+            console.print("Per-file rollback selected")
+            file_path = input("Enter file path to rollback: ")
+            success, msg = self.sync.rollback_file(file_path)
+            console.print(f"[{'green' if success else 'red'}] {msg} [/]")
+            input("\nPress Enter to return...")
+    
+    def do_settings(self):
+        """Show settings menu."""
+        self.clear()
+        self.draw_header()
+        console.print("[bold]Settings (placeholder)[/bold]")
+        console.print("Configuration handled via ~/.flamquency/config.yaml")
+        console.print("\nPress Enter to return...")
+        input()
+    
+    def do_about(self):
+        """Show about dialog."""
+        self.clear()
+        self.draw_header()
+        console.print("About FlamQuency-Sync")
+        console.print("Version 0.1.0")
+        console.print("Terminal-based file synchronization with rollback")
+        console.print("\n© 2026 LOSTFlam")
+        console.print("\nPress Enter to return...")
+        input()
+    
     def run(self):
         """Main TUI loop."""
         while self.running:
             self.draw_main_menu()
             
-            # Read user input - simplified, in real app would use proper input
-            # For now, just show menu and sleep
-            import time
-            time.sleep(0.5)
-        
-        console.clear()
-        console.print("Goodbye! ✨")
+            # Simple input - read one line
+            try:
+                choice = input("Choose option (1-5): ").strip()
+                self.handle_input(choice)
+            except (KeyboardInterrupt, EOFError):
+                self.running = False
+                sys.exit(0)
 
 def run_tui(sync_engine):
     """Run the TUI interface."""

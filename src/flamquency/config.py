@@ -1,5 +1,6 @@
 """Configuration management for FlamQuency-Sync."""
 import os
+import yaml
 from pathlib import Path
 
 # Base directories
@@ -12,12 +13,19 @@ DEFAULT_CONFIG = {
     "cloud_backend": "local",  # local, github, google_drive
     "cloud_repo_name": "flamquency-sync-{username}",
     "exclude_patterns": [
+        # Internal FlamQuency directories (prevent recursion)
+        "**/.flamquency/sync/**",
+        "**/.flamquency/snapshots/**",
+        "**/.flamquency/versions/**",
+        "**/.flamquency/data/**",
+        # Common noise
         "**/.cache/**",
         "**/*.tmp",
         "**/CheatEngine*.exe",
         "**/CheatEngineLinux*.exe",
         "**/*.log",
         "**/__pycache__/**",
+        "**/.git/**",
     ],
     "auto_sync": False,
     "sync_interval_hours": 24,
@@ -32,9 +40,14 @@ DEFAULT_CONFIG = {
 def load_config():
     """Load configuration from disk, merging with defaults."""
     if CONFIG_PATH.exists():
-        import yaml
-        with open(CONFIG_PATH) as f:
-            user_config = yaml.safe_load(f)
+        try:
+            with open(CONFIG_PATH) as f:
+                user_config = yaml.safe_load(f)
+        except:
+            user_config = {}
+        # Handle None from empty/special yaml files
+        if user_config is None:
+            user_config = {}
         # Merge with defaults
         config = merge_configs(DEFAULT_CONFIG, user_config)
     else:
