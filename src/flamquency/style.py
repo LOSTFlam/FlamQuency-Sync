@@ -28,25 +28,47 @@ from flamquency.icons import icon
 _CONSOLE_CACHE = None
 
 
-# ── Палитра «Угольки» — зеркало theme.py / DESIGN.md §1 ──
+# ── Палитра «Угольки» v3 — зеркало theme.py / DESIGN.md §1 ──
 PALETTE = {
     "surface":         "#1A1210",
     "surface-raised":  "#241814",
     "surface-overlay": "#2E1D18",
     "surface-sunken":  "#120C0A",
+    "surface-glass":   "#261A16",
     "accent":          "#FF6B1A",
     "accent-hot":      "#FF3D00",
     "accent-warm":     "#FFB347",
     "accent-deep":     "#B33C00",
+    "accent-ember":    "#8A2500",
+    "accent-glow":     "#FF8A50",
     "text":            "#F5E6DC",
     "text-muted":      "#A68B7B",
     "text-faint":      "#6B534A",
+    "text-contrast":   "#1A1210",
     "success":         "#4CAF50",
     "warning":         "#FFC107",
     "error":           "#E53935",
     "info":            "#FF8A50",
     "on-accent":       "#1A1210",
+    "on-hot":          "#FFFFFF",
+    "on-warm":         "#1A1210",
 }
+
+
+# ── Огненные градиенты (DESIGN.md §2) ──────────────────────
+# Порядок «от углей к ядру пламени» — используется в прогресс-барах,
+# баннерах и графиках. CLI и TUI ссылаются на одну шкалу.
+GRADIENT_EMBER = [
+    "#8A2500",  # accent-ember — глубокий уголь
+    "#B33C00",  # accent-deep — тлеющие угли
+    "#FF6B1A",  # accent — пламя
+    "#FF8A50",  # accent-glow — ореол
+    "#FFB347",  # accent-warm — тёплое ядро
+    "#FF3D00",  # accent-hot — ядро пламени
+]
+
+# Градиент для визуальных бар-чартов (рост хранилища, дедупликация)
+GRADIENT_FIRE = ["#B33C00", "#FF6B1A", "#FFB347"]
 
 
 def _build_theme():
