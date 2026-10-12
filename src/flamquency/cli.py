@@ -195,6 +195,13 @@ def cmd_status(args):
     snapshots = sync.list_snapshots()
     print(f"   Snapshots:    {len(snapshots)}")
 
+    # Ignore rules
+    ig_file = status.get("ignore_file")
+    if ig_file:
+        print(f"   Ignore file:  {ig_file} ({status.get('ignore_rules', 0)} rules)")
+    else:
+        print("   Ignore file:  ~/.flamquencyignore (not created yet)")
+
     return 0
 
 
@@ -374,6 +381,79 @@ def cmd_encryption(args):
     return 1
 
 
+def cmd_ignore(args):
+    """Manage ~/.flamquencyignore — init / add / check / list."""
+    from flamquency.ignore import (
+        IgnoreRules, IGNORE_FILENAME, default_ignore_path,
+        default_template, write_default_ignore_file,
+    )
+
+    path = Path(args.path).expanduser() if getattr(args, "path", None) \
+        else default_ignore_path()
+
+    # ── --init: write the starter file ─────────────────────────
+    if getattr(args, "init", False):
+        written = write_default_ignore_file(path, force=getattr(args, "force", False))
+        if written is None:
+            print(f"⚠️  {path} already exists — nothing written")
+            print("   Use --force to overwrite with the default template")
+            return 1
+        rules = IgnoreRules.from_file(written)
+        print(f"📝 Created {written} ({len(rules)} rules)")
+        print("   Syntax works like .gitignore — edit it any time")
+        return 0
+
+    # ── --add: append one pattern ──────────────────────────────
+    if getattr(args, "add", None):
+        if not path.exists():
+            # start from the template so the user gets the comments too
+            write_default_ignore_file(path)
+        with open(path, "a") as f:
+            f.write(f"\n{args.add.strip()}\n")
+        rules = IgnoreRules.from_file(path)
+        print(f"➕ Added '{args.add.strip()}' → {path}")
+        print(f"   {len(rules)} rule(s) total")
+        return 0
+
+    # ── --check: explain one path ──────────────────────────────
+    if getattr(args, "check", None):
+        rules = IgnoreRules.from_file(path)
+        target = args.check
+        ignored, rule = rules.explain(target)
+        if ignored:
+            print(f"🚫 IGNORED:    {target}")
+            if rule is not None:
+                print(f"   by rule: {rule.raw}")
+        elif rule is not None:
+            print(f"✅ NOT IGNORED: {target}")
+            print(f"   re-included by: {rule.raw}")
+        else:
+            print(f"✅ NOT IGNORED: {target}")
+            print(f"   (no rule matches — {len(rules)} rule(s) checked)")
+        return 0
+
+    # ── --list / default: show the rules ───────────────────────
+    rules = IgnoreRules.from_file(path)
+    if not path.exists():
+        print(f"📄 No ignore file yet at {path}")
+        print("   Create one with: flamquency ignore --init")
+        return 0
+    print(f"📄 {path} — {len(rules)} rule(s)")
+    if not rules:
+        return 0
+    for rule in rules:
+        flags = []
+        if rule.negate:
+            flags.append("negate")
+        if rule.dir_only:
+            flags.append("dir")
+        if rule.anchored:
+            flags.append("anchored")
+        tag = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"   {rule.raw}{tag}")
+    return 0
+
+
 def cmd_config(args):
     """Show or edit configuration."""
     config = load_config()
@@ -444,6 +524,17 @@ def main():
     p_enc.add_argument("--password", "-p", help="Password (else env FLAMQUENCY_PASSWORD or prompt)")
     p_enc.add_argument("--new-password", help="New password for change-password (else prompt)")
 
+    # ignore
+    p_ign = subparsers.add_parser(
+        "ignore", help="Manage ~/.flamquencyignore (gitignore-style rules)"
+    )
+    p_ign.add_argument("--path", help="Ignore file path (default: ~/.flamquencyignore)")
+    p_ign.add_argument("--init", action="store_true", help="Create the default ignore file")
+    p_ign.add_argument("--force", action="store_true", help="Overwrite with --init even if it exists")
+    p_ign.add_argument("--add", metavar="PATTERN", help="Append a pattern to the file")
+    p_ign.add_argument("--check", metavar="PATH", help="Explain whether a path is ignored")
+    p_ign.add_argument("--list", "-l", action="store_true", help="List the loaded rules")
+
     args = parser.parse_args()
     
     if not args.command:
@@ -462,6 +553,7 @@ def main():
         "watch": cmd_watch,
         "config": cmd_config,
         "encryption": cmd_encryption,
+        "ignore": cmd_ignore,
     }
     
     handler = commands.get(args.command)

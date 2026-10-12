@@ -7,9 +7,21 @@ from pathlib import Path
 from datetime import datetime
 from flamquency.version_store import VersionStore, BlobStore
 from flamquency.cloud import LocalBackend
+from flamquency.ignore import IgnoreRules, default_ignore_path
 from flamquency.encryption import (
     EncryptionManager, EncryptionError, WrongPasswordError,
     EncryptionLockedError, DecryptionError,
+)
+
+# Internal FlamQuency data that must NEVER be synced (recursion guard +
+# the encryption key file). These are hard excludes: not even a negation
+# rule in .flamquencyignore can re-include them.
+INTERNAL_EXCLUDE_PATTERNS = (
+    "**/.flamquency/sync/**",
+    "**/.flamquency/snapshots/**",
+    "**/.flamquency/versions/**",
+    "**/.flamquency/data/**",
+    "**/.flamquency/encryption.json",
 )
 
 class SyncResult:
@@ -25,18 +37,35 @@ class SyncResult:
 class FlamQuencySync:
     """Main synchronization engine."""
 
-    def __init__(self, config=None, backend=None, password=None, base_dir=None):
+    def __init__(self, config=None, backend=None, password=None, base_dir=None,
+                 ignore_file=None):
         self.config = config or {}
         self.backend = backend or LocalBackend()
         self.base_dir = Path(base_dir) if base_dir else Path.home() / ".flamquency"
         self.snapshot_dir = self.base_dir / "snapshots"
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
         self.encryption = self._setup_encryption(password)
+        self.ignore_rules = self._setup_ignore(ignore_file)
         self.version_store = VersionStore(
             self.base_dir / "versions", encryption=self.encryption
         )
         self.version_dir = self.base_dir / "versions" / "files"
         self.version_dir.mkdir(parents=True, exist_ok=True)
+
+    def _setup_ignore(self, ignore_file):
+        """Load .flamquencyignore rules (gitignore-style syntax).
+
+        - explicit ignore_file (tests, future --ignore flag) always wins
+        - otherwise ~/.flamquencyignore is used when use_ignore_file is on
+        - a missing file is simply "no rules" — never an error
+        """
+        if ignore_file is not None:
+            return IgnoreRules.from_file(Path(ignore_file).expanduser())
+        if not self.config.get("use_ignore_file", True):
+            return IgnoreRules.empty()
+        custom = self.config.get("ignore_file_path")
+        path = Path(custom).expanduser() if custom else default_ignore_path()
+        return IgnoreRules.from_file(path)
 
     def _setup_encryption(self, password):
         """Build the encryption manager for the version store.
@@ -72,25 +101,83 @@ class FlamQuencySync:
                     "provide the password (--password / FLAMQUENCY_PASSWORD)"
                 )
 
-    def scan_directory(self, path, exclude_patterns=None, max_files=10000):
+    def _rel_to(self, path, root):
+        """POSIX-style path of `path` relative to `root` (for ignore matching)."""
+        try:
+            return Path(path).relative_to(Path(root)).as_posix()
+        except ValueError:
+            return Path(path).as_posix()
+
+    def _is_internal(self, path_str):
+        """Hard excludes — internal FlamQuency data is never syncable."""
+        return self._matches_pattern(path_str, INTERNAL_EXCLUDE_PATTERNS)
+
+    def _ignore_decision(self, path, root, is_dir=False, patterns=None):
+        """The single exclusion decision for one path.
+
+        Precedence (first hit wins):
+        1. internal FlamQuency data — never negotiable
+        2. .flamquencyignore rules — last matching rule wins, and a
+           negation here overrides the config defaults (that's the point
+           of letting users customize: "I *do* want my .log files")
+        3. config exclude_patterns — the built-in defaults (or an
+           explicitly passed override)
+        """
+        path_str = str(path)
+        if self._is_internal(path_str):
+            return True
+        if self.ignore_rules:
+            rel = self._rel_to(path, root)
+            ignored, decider = self.ignore_rules.explain(rel, is_dir=is_dir)
+            if decider is not None:
+                return ignored
+        if patterns is None:
+            patterns = self.config.get("exclude_patterns", [])
+        return self._matches_pattern(path_str, patterns)
+
+    def _scan_with_stats(self, path, exclude_patterns=None, max_files=10000):
+        """Walk `path` and return (kept_files, excluded_count).
+
+        Config exclude_patterns AND .flamquencyignore rules both apply;
+        ignored directories are pruned (never descended into), and every
+        skipped file is counted so `sync` can report it.
+        """
         if exclude_patterns is None:
             exclude_patterns = self.config.get("exclude_patterns", [])
-        
+
         path = Path(path)
         if not path.exists():
-            return []
-        
+            return [], 0
+
         files = []
+        excluded = 0
         for root, dirs, filenames in os.walk(path):
             root_path = Path(root)
-            dirs[:] = [d for d in dirs if not self._matches_pattern(
-                str(root_path / d), exclude_patterns)]
+            kept_dirs = []
+            for d in dirs:
+                dir_path = root_path / d
+                if self._ignore_decision(dir_path, path, is_dir=True,
+                                         patterns=exclude_patterns):
+                    excluded += 1
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
             for filename in filenames:
                 if len(files) >= max_files:
-                    return files
+                    return files, excluded
                 file_path = root_path / filename
-                if not self._matches_pattern(str(file_path), exclude_patterns):
-                    files.append(file_path)
+                if self._ignore_decision(file_path, path, is_dir=False,
+                                         patterns=exclude_patterns):
+                    excluded += 1
+                    continue
+                files.append(file_path)
+        return files, excluded
+
+    def scan_directory(self, path, exclude_patterns=None, max_files=10000):
+        """Public scan API — just the kept files (unchanged signature)."""
+        files, _ = self._scan_with_stats(
+            path, exclude_patterns=exclude_patterns, max_files=max_files
+        )
         return files
     
     def _matches_pattern(self, path_str, patterns):
@@ -126,7 +213,8 @@ class FlamQuencySync:
         for item in source_path.rglob('*'):
             if count >= max_files:
                 break
-            if item.is_file() and not self._matches_pattern(str(item), excluded):
+            if item.is_file() and not self._ignore_decision(
+                    item, source_path, is_dir=False):
                 rel = str(item.relative_to(source_path))
                 file_hash = self.version_store.blob_store.store_file(item)
                 manifest[rel] = file_hash
@@ -155,17 +243,16 @@ class FlamQuencySync:
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=True)
         
-        source_files = self.scan_directory(source, self.config.get("exclude_patterns", []), max_files=max_files)
+        source_files, excluded_count = self._scan_with_stats(
+            source, max_files=max_files
+        )
         
         result = SyncResult()
+        result.files_excluded = excluded_count
         
         for src_file in source_files:
             rel = src_file.relative_to(source)
             dest_file = destination / rel
-            
-            if self._matches_pattern(str(src_file), self.config.get("exclude_patterns", [])):
-                result.files_excluded += 1
-                continue
             
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             
@@ -309,6 +396,9 @@ class FlamQuencySync:
             enc_state = "enabled"
         else:
             enc_state = "locked"
+        ignore_file = None
+        if self.ignore_rules and self.ignore_rules.path:
+            ignore_file = str(self.ignore_rules.path)
         return {
             "last_sync": self.config.get("last_sync"),
             "backend": backend_status.get("backend", "local"),
@@ -318,4 +408,6 @@ class FlamQuencySync:
             "storage_bytes": vs_stats.get("stored_bytes", 0),
             "encryption": enc_state,
             "encrypted_blobs": vs_stats.get("encrypted_blobs", 0),
+            "ignore_rules": len(self.ignore_rules),
+            "ignore_file": ignore_file,
         }

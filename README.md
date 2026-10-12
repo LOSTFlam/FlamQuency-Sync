@@ -15,6 +15,7 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Compression** — zlib compression with deduplication
 - **Diff** — compare text file versions
 - **Encryption** — optional Fernet (AES-128) encryption of stored blobs with your password
+- **.flamquencyignore** — gitignore-style rules so you decide exactly what never gets synced
 
 ## Installation
 
@@ -74,6 +75,12 @@ flamquency encryption status
 flamquency encryption enable            # asks for a password interactively
 flamquency encryption disable
 flamquency encryption change-password
+
+# Ignore rules (~/.flamquencyignore)
+flamquency ignore --init                # create the starter ignore file
+flamquency ignore --list                # show the loaded rules
+flamquency ignore --add "*.psd"         # append a pattern
+flamquency ignore --check design.psd    # explain whether a path is ignored
 ```
 
 The password can also come from the `FLAMQUENCY_PASSWORD` environment
@@ -117,6 +124,43 @@ flamquency encryption disable
 > ⚠️ Without the password the encrypted blobs are unrecoverable — there is no
 > backdoor. Keep a backup of `~/.flamquency/` somewhere safe.
 
+## .flamquencyignore
+
+`~/.flamquencyignore` lets you decide exactly what never gets synced — the
+syntax is the familiar `.gitignore` one, so there is nothing new to learn:
+
+```gitignore
+# comments start with #
+*.log              # ignore every .log at any depth
+!keep.log          # negation — re-include (last matching rule wins)
+build/             # directories only (trailing slash)
+/rooted.txt        # anchored to the home directory
+**/node_modules    # ** crosses directory boundaries
+temp?.tmp          # ? matches exactly one character
+```
+
+- **Last match wins** — rules are evaluated in order; a `!` rule re-includes
+  what an earlier rule excluded
+- **Ignored directories are pruned** — nothing inside them is ever walked,
+  which also keeps large trees fast
+- **Your rules override the built-in defaults** — the default config excludes
+  `*.log`, but `!keep.log` brings it back. Internal FlamQuency data
+  (`~/.flamquency/versions/**`, the encryption key file, …) stays protected
+  no matter what you write — those are hard excludes
+- **No file, no problem** — a missing `.flamquencyignore` simply means no
+  extra rules; sync behaves exactly as before
+
+```bash
+flamquency ignore --init              # write the starter file
+flamquency ignore --list              # show rules with their flags
+flamquency ignore --add "*.psd"       # append a pattern
+flamquency ignore --check design.psd  # which rule decides for this path?
+```
+
+`flamquency status` reports the active file and rule count. Disable the whole
+mechanism with `use_ignore_file: false` in the config, or point it elsewhere
+with `ignore_file_path: /path/to/file`.
+
 ## Configuration
 
 Config stored in `~/.flamquency/config.yaml`:
@@ -153,6 +197,7 @@ flamquency/
 ├── sync_engine.py       # Core sync engine
 ├── version_store.py     # Content-addressable blob storage
 ├── encryption.py        # Fernet/AES blob encryption
+├── ignore.py            # .flamquencyignore (gitignore-style rules)
 ├── github_backend.py    # GitHub cloud backend
 ├── cloud.py             # Backend abstraction
 ├── config.py            # YAML configuration

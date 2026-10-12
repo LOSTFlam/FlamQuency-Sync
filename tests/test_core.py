@@ -22,14 +22,21 @@ from flamquency.encryption import (
 ENC_PW = "correct horse battery staple"
 
 
-def _isolated_sync(tmpdir, config=None, password=None):
-    """Create a FlamQuencySync with isolated storage in a temp dir."""
+def _isolated_sync(tmpdir, config=None, password=None, ignore_file=None):
+    """Create a FlamQuencySync with isolated storage in a temp dir.
+
+    Hermetic by default: the real ~/.flamquencyignore is only loaded when a
+    test passes ignore_file explicitly.
+    """
     if config is None:
         config = load_config()
+    config = dict(config)  # copy — never mutate the caller's dict
+    config["use_ignore_file"] = False
     base = Path(tmpdir) / ".flamquency_isolated"
     backend = LocalBackend(base_path=base / "sync")
     return FlamQuencySync(
-        config=config, backend=backend, password=password, base_dir=base
+        config=config, backend=backend, password=password, base_dir=base,
+        ignore_file=ignore_file,
     )
 
 
@@ -524,6 +531,256 @@ def test_sync_engine_unlock_after_lock():
     print("✓ Store works again after unlocking in-place")
 
 
+# ── .flamquencyignore ──────────────────────────────────────────
+
+def test_ignore_rules_parse_skips_comments_and_blanks():
+    from flamquency.ignore import IgnoreRules
+    rules = IgnoreRules.from_lines([
+        "# a comment", "", "   ", "*.log", "!keep.log",
+        "build/", "/rooted.txt", "**/node_modules",
+    ])
+    assert len(rules) == 5, f"expected 5 rules, got {len(rules)}"
+    raws = [r.raw for r in rules]
+    assert raws == ["*.log", "!keep.log", "build/", "/rooted.txt", "**/node_modules"]
+    assert not rules.rules[0].negate
+    assert rules.rules[1].negate
+    assert rules.rules[2].dir_only
+    assert not rules.rules[2].negate
+    assert rules.rules[3].anchored
+    print("✓ Ignore rules parse: comments/blanks dropped, flags extracted")
+
+
+def test_ignore_rules_match_semantics():
+    from flamquency.ignore import IgnoreRules
+    rules = IgnoreRules.from_lines([
+        "*.log", "!keep.log", "build/", "/rooted.txt",
+        "**/node_modules", "temp?.tmp",
+    ])
+    # plain name pattern matches at any depth
+    assert rules.match("app.log")
+    assert rules.match("logs/deep/app.log")
+    # negation wins — later rule re-includes
+    assert not rules.match("keep.log")
+    assert not rules.match("sub/keep.log")
+    # directory-only pattern
+    assert rules.match("build", is_dir=True)
+    assert not rules.match("build", is_dir=False)      # a *file* named build is kept
+    assert rules.match("x/build/out.o")                 # contents of an ignored dir
+    # anchored pattern only matches at the root
+    assert rules.match("rooted.txt")
+    assert not rules.match("sub/rooted.txt")
+    # ** crosses directories
+    assert rules.match("a/b/c/node_modules", is_dir=True)
+    assert not rules.match("a/b/c/node_modules_old", is_dir=True)
+    # ? matches exactly one char
+    assert rules.match("temp1.tmp")
+    assert not rules.match("temp12.tmp")
+    print("✓ Ignore match semantics work (negation, dir-only, anchored, **, ?)")
+
+
+def test_ignore_rules_last_match_wins():
+    from flamquency.ignore import IgnoreRules
+    rules = IgnoreRules.from_lines(["*.txt", "!notes.txt", "*.txt"])
+    # the last matching rule decides — re-excluded
+    assert rules.match("notes.txt")
+    rules2 = IgnoreRules.from_lines(["*.txt", "!notes.txt"])
+    assert not rules2.match("notes.txt")
+    # no rule matches → not ignored
+    assert not rules2.match("photo.png")
+    print("✓ Ignore rules: last matching rule wins, default is include")
+
+
+def test_ignore_rules_from_file_and_missing_file():
+    from flamquency.ignore import IgnoreRules
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p = Path(tmpdir) / ".flamquencyignore"
+        p.write_text("# my rules\n\n*.bak\nsecret/\n")
+        rules = IgnoreRules.from_file(p)
+        assert len(rules) == 2
+        assert rules.match("old.bak")
+        assert rules.match("secret", is_dir=True)
+        assert rules.path == p
+        # a missing file is simply "no rules" — never an error
+        missing = IgnoreRules.from_file(Path(tmpdir) / "nope")
+        assert len(missing) == 0
+        assert not missing.match("anything")
+    print("✓ Ignore rules load from file; missing file = no rules")
+
+
+def test_ignore_rules_explain_reports_matching_rule():
+    from flamquency.ignore import IgnoreRules
+    rules = IgnoreRules.from_lines(["*.log", "!keep.log"])
+    ignored, rule = rules.explain("app.log")
+    assert ignored
+    assert rule is not None and rule.raw == "*.log"
+    ignored2, rule2 = rules.explain("keep.log")
+    assert not ignored2
+    assert rule2 is not None and rule2.raw == "!keep.log"
+    ignored3, rule3 = rules.explain("photo.png")
+    assert not ignored3
+    assert rule3 is None
+    print("✓ Ignore explain() reports which rule decided")
+
+
+def test_default_ignore_template_written():
+    from flamquency.ignore import (
+        IGNORE_FILENAME, IgnoreRules, default_template, write_default_ignore_file,
+    )
+    assert IGNORE_FILENAME == ".flamquencyignore"
+    text = default_template()
+    assert text.startswith("#")
+    assert "*.log" in text and "!keep.log" in text
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p = Path(tmpdir) / IGNORE_FILENAME
+        write_default_ignore_file(p)
+        assert p.exists()
+        # the written file must be valid rules that actually ignore things
+        rules = IgnoreRules.from_file(p)
+        assert len(rules) > 5
+        assert rules.match("debug.log")
+        # writing again refuses to clobber an existing file
+        before = p.read_text()
+        write_default_ignore_file(p)
+        assert p.read_text() == before
+    print("✓ Default ignore template is written once and stays valid")
+
+
+def test_engine_without_ignore_file_has_no_rules():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir, ignore_file=Path(tmpdir) / "absent")
+        assert len(sync.ignore_rules) == 0
+        assert not sync.ignore_rules.match("whatever.log")
+        assert sync.status()["ignore_rules"] == 0
+        assert sync.status()["ignore_file"] is None
+    print("✓ Engine without an ignore file behaves exactly as before")
+
+
+def test_scan_directory_respects_ignore_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        ig = t / ".flamquencyignore"
+        ig.write_text("*.log\n!keep.log\nbuild/\n/rooted.txt\n")
+        sync = _isolated_sync(tmpdir, ignore_file=ig)
+
+        (t / "notes.txt").write_text("keep me")
+        (t / "debug.log").write_text("noise")
+        (t / "keep.log").write_text("important")
+        (t / "rooted.txt").write_text("root")
+        (t / "sub").mkdir()
+        (t / "sub" / "rooted.txt").write_text("nested ok")
+        (t / "build").mkdir()
+        (t / "build" / "out.o").write_text("artifact")
+        (t / "junk.tmp").write_text("config-excluded")
+
+        files = sync.scan_directory(t)
+        names = {f.name for f in files}
+        assert "notes.txt" in names
+        assert "debug.log" not in names        # ignored by *.log
+        assert "keep.log" in names             # re-included by !keep.log
+        # anchored rule hits only the root copy, not the nested one
+        assert (t / "rooted.txt") not in files
+        assert (t / "sub" / "rooted.txt") in files
+        assert not any("out.o" in str(f) for f in files)  # build/ pruned as a directory
+        assert not any("junk.tmp" in str(f) for f in files)  # config exclude still wins
+    print("✓ scan_directory honors .flamquencyignore rules")
+
+
+def test_sync_counts_ignored_files():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        ig = t / ".flamquencyignore"
+        ig.write_text("*.log\nbuild/\n")
+        sync = _isolated_sync(tmpdir, ignore_file=ig)
+
+        (t / "a.txt").write_text("hello")
+        (t / "b.log").write_text("noise")
+        (t / "build").mkdir()
+        (t / "build" / "c.o").write_text("artifact")
+
+        result = sync.sync(source=t)
+        assert result.files_synced >= 1
+        assert not result.errors, result.errors
+        # ignored files are counted, not silently dropped
+        assert result.files_excluded >= 2, result.files_excluded
+        dest = sync.backend.base_path
+        assert (dest / "a.txt").exists()
+        assert not (dest / "b.log").exists()
+        assert not (dest / "build").exists()
+    print("✓ sync counts ignored files and never copies them")
+
+
+def test_snapshot_respects_ignore_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        ig = t / ".flamquencyignore"
+        ig.write_text("*.secret\n")
+        sync = _isolated_sync(tmpdir, ignore_file=ig)
+
+        (t / "public.txt").write_text("fine")
+        (t / "private.secret").write_text("nope")
+
+        snap, meta = sync.create_snapshot(source_path=t)
+        manifest = meta["manifest"]
+        assert "public.txt" in manifest
+        assert not any("private.secret" in k for k in manifest)
+    print("✓ create_snapshot honors .flamquencyignore rules")
+
+
+def test_cli_ignore_init_and_check():
+    import io
+    import contextlib
+    from argparse import Namespace
+    from flamquency.cli import cmd_ignore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ig = Path(tmpdir) / ".flamquencyignore"
+
+        # --init writes the default template
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_ignore(Namespace(path=str(ig), init=True, force=False,
+                                      add=None, check=None, list=False))
+        assert rc == 0
+        assert ig.exists()
+        assert "*.log" in ig.read_text()
+
+        # --check reports the decision for a path
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_ignore(Namespace(path=str(ig), init=False, force=False,
+                                      add=None, check="debug.log", list=False))
+        out = buf.getvalue()
+        assert rc == 0
+        assert "ignored" in out.lower()
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_ignore(Namespace(path=str(ig), init=False, force=False,
+                                      add=None, check="notes.txt", list=False))
+        out = buf.getvalue()
+        assert rc == 0
+        assert "not ignored" in out.lower()
+
+        # --add appends a pattern and it takes effect
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_ignore(Namespace(path=str(ig), init=False, force=False,
+                                      add="*.huge", check=None, list=False))
+        assert rc == 0
+        rules_text = ig.read_text()
+        assert "*.huge" in rules_text
+
+        # --list prints the loaded rules
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_ignore(Namespace(path=str(ig), init=False, force=False,
+                                      add=None, check=None, list=True))
+        out = buf.getvalue()
+        assert rc == 0
+        assert "*.huge" in out and "*.log" in out
+    print("✓ CLI `flamquency ignore` init/add/check/list works")
+
+
 def main():
     print("🔥 Running FlamQuency-Sync tests...\n")
     
@@ -552,6 +809,17 @@ def main():
         test_sync_engine_wrong_password_rejected,
         test_sync_engine_locked_store_refuses_to_run,
         test_sync_engine_unlock_after_lock,
+        test_ignore_rules_parse_skips_comments_and_blanks,
+        test_ignore_rules_match_semantics,
+        test_ignore_rules_last_match_wins,
+        test_ignore_rules_from_file_and_missing_file,
+        test_ignore_rules_explain_reports_matching_rule,
+        test_default_ignore_template_written,
+        test_engine_without_ignore_file_has_no_rules,
+        test_scan_directory_respects_ignore_file,
+        test_sync_counts_ignored_files,
+        test_snapshot_respects_ignore_file,
+        test_cli_ignore_init_and_check,
     ]
     
     passed = 0

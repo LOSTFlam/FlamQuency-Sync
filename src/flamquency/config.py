@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "auto_sync": False,
     "sync_interval_hours": 24,
     "last_sync": None,
+    "use_ignore_file": True,  # honor ~/.flamquencyignore (gitignore-style)
+    "ignore_file_path": None,  # custom path; None = ~/.flamquencyignore
     "encryption": {
         "enabled": False,  # Fernet/AES encryption of stored blobs
     },
