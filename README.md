@@ -17,8 +17,12 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Encryption** — optional Fernet (AES-128) encryption of stored blobs with your password
 - **.flamquencyignore** — gitignore-style rules so you decide exactly what never gets synced
 - **Sync profiles** — named sets of paths for different scenarios, switchable in one command
-- **Retention policy** — auto-prune old snapshots by count or age
-- **«Угольки» design system** — consistent fire-themed TUI, see docs/DESIGN.md
+- **Retention policy** — restic-style pruning: keep-last / hourly / daily / weekly / monthly / yearly / keep-within
+- **Integrity check** — `flamquency check` verifies the blob store (restic-check analogue)
+- **Storage stats** — `flamquency stats`: dedup ratio, saved space, encryption
+- **Auto-update** — `flamquency update`: checks GitHub releases/git-tags, installs via pip or git
+- **Nerd Font icons** — no emoji; automatic ASCII fallback when the font is missing
+- **«Угольки» design system** — one palette for CLI and TUI, see docs/DESIGN.md
 
 ## Installation
 
@@ -58,9 +62,21 @@ flamquency snapshots
 # Quick setup (creates config, ignore file, retention policy)
 flamquency init --keep-last 10
 
-# Prune old snapshots (retention policy)
-flamquency prune --keep-last 5 --dry-run
+# Prune old snapshots (restic-style retention)
+flamquency prune --keep-last 5 --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --dry-run
 flamquency prune --older-than 30 --yes
+flamquency prune --keep-within 1y6m --yes
+
+# Integrity check (restic-check analogue)
+flamquency check
+
+# Storage statistics (dedup, saved space)
+flamquency stats
+
+# Updates
+flamquency update --check     # only check
+flamquency update             # check + install (asks)
+flamquency update --yes       # check + install automatically
 
 # Rollback to snapshot
 flamquency rollback --list

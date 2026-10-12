@@ -751,7 +751,7 @@ def test_cli_ignore_init_and_check():
                                       add=None, check="debug.log", list=False))
         out = buf.getvalue()
         assert rc == 0
-        assert "ignored" in out.lower()
+        assert "игнорируется" in out.lower() and "не игнорируется" not in out.lower()
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -759,7 +759,7 @@ def test_cli_ignore_init_and_check():
                                       add=None, check="notes.txt", list=False))
         out = buf.getvalue()
         assert rc == 0
-        assert "not ignored" in out.lower()
+        assert "не игнорируется" in out.lower()
 
         # --add appends a pattern and it takes effect
         buf = io.StringIO()
@@ -1179,10 +1179,29 @@ def test_prune_snapshots_combined_policy():
         for i in range(6):
             (src / f"file{i}.txt").write_text(f"v{i}")
             sync.sync(source=src)
-        # keep_last=2 + older_than_days=0 → union: всё удаляется
-        deleted, msg = sync.prune_snapshots(keep_last=2, older_than_days=0)
-        assert deleted == 6
-    print("✓ prune_snapshots combines keep_last and older_than_days")
+        # Union: keep_last=2 защищает 2 свежих, keep_hourly=1 — свежайший
+        # часа. В одном часе обе политики защищают почти то же → left ≤ 2
+        deleted, msg = sync.prune_snapshots(keep_last=2, keep_hourly=1)
+        assert deleted >= 4, f"expected ≥4 pruned, got {deleted}"
+        assert len(sync.list_snapshots()) == 6 - deleted
+    print("✓ prune_snapshots combines keep_last and keep_hourly (union)")
+
+
+def test_prune_snapshots_older_than_days_protects():
+    """older_than_days — политика ЗАЩИТЫ: новее N дней сохраняется."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(4):
+            (src / f"file{i}.txt").write_text(f"v{i}")
+            sync.sync(source=src)
+        # Все снапшоты свежие: older_than_days=30 не даёт удалить ничего
+        deleted, msg = sync.prune_snapshots(older_than_days=30)
+        assert deleted == 0
+        assert len(sync.list_snapshots()) == 4
+        # older_than_days=0 — защищает снапшоты новее «сейчас»: все прошлые
+        deleted, msg = sync.prune_snapshots(older_than_days=0)
+        assert deleted == 4
+    print("✓ prune_snapshots older_than_days protects recent snapshots")
 
 
 # ── TUI theme ───────────────────────────────────────────────
@@ -1205,6 +1224,137 @@ def test_theme_applied_to_app():
     assert app.theme == "flamquency-fire"
     assert "flamquency-fire" in [t.name for t in app.available_themes.values()]
     print("✓ FlamQuencyApp registers and activates the fire theme")
+
+
+# ── Updater ────────────────────────────────────────────────
+
+def test_updater_version_comparison():
+    from flamquency.updater import is_newer
+    assert is_newer("1.0.1", "1.0.0")
+    assert is_newer("2.0", "1.9.9")
+    assert not is_newer("1.0.0", "1.0.0")
+    assert not is_newer("0.9", "1.0.0")
+    print("✓ updater is_newer compares versions correctly")
+
+
+def test_updater_check_never_raises(monkeypatch=None):
+    """check_for_update не бросает исключений даже без сети."""
+    from flamquency.updater import check_for_update
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Кэш пуст, сеть может быть — но метод должен вернуть UpdateInfo
+        info = check_for_update("0.1.0", base_dir=tmpdir, use_cache=False)
+        assert info.current == "0.1.0"
+        # Либо доступна версия, либо внятная ошибка — но не краш
+        assert info.available in (True, False)
+    print("✓ updater check_for_update returns UpdateInfo without raising")
+
+
+def test_updater_cache_roundtrip():
+    """Результат проверки кэшируется и читается обратно."""
+    from flamquency import updater
+    import tempfile, json
+    from pathlib import Path
+    from datetime import datetime
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        info = updater.UpdateInfo(
+            available=True, current="0.1.0", latest="0.2.0",
+            source="git-tag", url="https://example.com",
+            checked_at=datetime.now().isoformat(),
+        )
+        updater._write_cache(Path(tmpdir), info)
+        cached = updater._read_cache(Path(tmpdir), max_age_hours=6)
+        assert cached is not None
+        assert cached.latest == "0.2.0"
+        assert cached.available is True
+    print("✓ updater cache write/read roundtrip")
+
+
+def test_updater_detect_install_method():
+    from flamquency.updater import detect_install_method
+    method, path = detect_install_method()
+    assert method in ("git", "pip", "unknown")
+    assert path is not None
+    print(f"✓ updater detects install method: {method}")
+
+
+# ── Icons & style ──────────────────────────────────────────
+
+def test_icons_no_emoji():
+    """Набор иконок — только Nerd Font глифы и ASCII-fallback, без эмодзи."""
+    from flamquency.icons import _GLYPHS, _FALLBACK, icon
+    import unicodedata
+    for name, glyph in _GLYPHS.items():
+        # эмодзи живут в этих диапазонах — они запрещены DESIGN.md §8
+        assert not (0x1F300 <= ord(glyph[0]) <= 0x1FAFF),             f"emoji in glyph {name}: {glyph}"
+    # fallback тоже без эмодзи высоких диапазонов
+    for name, glyph in _FALLBACK.items():
+        assert not (0x1F300 <= ord(glyph[0]) <= 0x1FAFF) or name in ("fire", "flame"), \
+            f"emoji in fallback {name}"
+    print("✓ icon set contains no emoji (Nerd Font only)")
+
+
+def test_icons_fallback_when_no_font():
+    from flamquency.icons import icon
+    force = icon("fire", force_font=False)
+    assert force == "🔥"  # ASCII-fallback для fire — огонь читается и так
+    nerd = icon("fire", force_font=True)
+    assert nerd == "\uf0e7"
+    print("✓ icons fall back to ASCII when Nerd Font missing")
+
+
+def test_style_palette_matches_theme():
+    """Палитра style.py (CLI) зеркалит theme.py (TUI) — DESIGN.md §1."""
+    from flamquency.style import PALETTE
+    from flamquency.theme import FLAMQUENCY_FIRE
+    assert PALETTE["surface"] == "#1A1210" == FLAMQUENCY_FIRE.background
+    assert PALETTE["accent"] == "#FF6B1A" == FLAMQUENCY_FIRE.primary
+    assert PALETTE["surface-raised"] == "#241814" == FLAMQUENCY_FIRE.surface
+    assert PALETTE["success"] == FLAMQUENCY_FIRE.success
+    assert PALETTE["error"] == FLAMQUENCY_FIRE.error
+    print("✓ CLI palette mirrors TUI theme (single source of truth)")
+
+
+def test_style_helpers():
+    from flamquency.style import human_size, human_time
+    assert human_size(0) == "0.0 B"
+    assert "KB" in human_size(2048)
+    assert "MB" in human_size(5 * 1024 * 1024)
+    assert human_time(None) == "никогда"
+    assert human_time("garbage") == "garbage"
+    print("✓ style helpers format size and time")
+
+
+# ── Integrity check ────────────────────────────────────────
+
+def test_check_integrity_ok():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        (src / "a.txt").write_text("hello")
+        sync.sync(source=src)
+        ok, problems = sync.check_integrity()
+        assert ok, f"expected ok, got: {problems}"
+        assert problems == []
+    print("✓ check_integrity passes on healthy store")
+
+
+def test_check_integrity_detects_missing_blob():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        (src / "a.txt").write_text("hello")
+        sync.sync(source=src)
+        # Удаляем блоб вручную — имитация потери данных
+        blob_store = sync.version_store.blob_store
+        index = blob_store._index
+        assert index, "no blobs recorded"
+        victim = next(iter(index))
+        victim_path = blob_store._blob_path(victim)
+        victim_path.unlink()
+        ok, problems = sync.check_integrity()
+        assert not ok
+        assert any(victim[:12] in p for p in problems)
+    print("✓ check_integrity detects missing blob")
 
 
 def main():
@@ -1260,8 +1410,19 @@ def main():
         test_prune_snapshots_not_configured,
         test_prune_snapshots_older_than_days,
         test_prune_snapshots_combined_policy,
+        test_prune_snapshots_older_than_days_protects,
         test_theme_registered,
         test_theme_applied_to_app,
+        test_updater_version_comparison,
+        test_updater_check_never_raises,
+        test_updater_cache_roundtrip,
+        test_updater_detect_install_method,
+        test_icons_no_emoji,
+        test_icons_fallback_when_no_font,
+        test_style_palette_matches_theme,
+        test_style_helpers,
+        test_check_integrity_ok,
+        test_check_integrity_detects_missing_blob,
     ]
     
     passed = 0

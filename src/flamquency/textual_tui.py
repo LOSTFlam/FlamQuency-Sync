@@ -17,6 +17,8 @@ from textual.screen import Screen
 from textual import work
 
 from flamquency.theme import FLAMQUENCY_FIRE
+from flamquency.icons import icon
+from flamquency.style import human_size, human_time
 
 
 # ── Переиспользуемые компоненты (DESIGN.md §4) ──────────────────────
@@ -49,25 +51,27 @@ class StatusBar(Static):
         status = self.sync.status()
         last = status.get("last_sync")
         if last and last != "None":
-            last = last[:19].replace("T", " ")
+            last = human_time(last)
         else:
             last = "никогда"
-        
-        storage_mb = status.get("storage_bytes", 0) / (1024 * 1024)
-        
+
+        storage = human_size(status.get("storage_bytes", 0))
+
         enc = status.get("encryption", "disabled")
-        enc_icons = {"enabled": "🔒", "locked": "🔐", "disabled": "🔓"}
-        enc_colors = {"enabled": "success", "locked": "warning", "disabled": "warning"}
-        
+        enc_glyph = {"enabled": icon("lock"), "locked": icon("key"),
+                     "disabled": icon("warning")}[enc]
+        enc_colors = {"enabled": "success", "locked": "warning",
+                      "disabled": "warning"}
+
         profile = status.get("active_profile", "default")
-        
+
         yield Static(
-            f" [bold]Бэкенд:[/] {status.get('backend', 'local')}  "
-            f"[bold]Файлов:[/] {status.get('tracked_files', 0)}  "
-            f"[bold]Хранилище:[/] {storage_mb:.2f} MB  "
-            f"[{enc_colors.get(enc, 'warning')}]{enc_icons.get(enc, '🔓')}[/]  "
-            f"[bold]Профиль:[/] {profile}  "
-            f"[bold]Синк:[/] {last}",
+            f" {icon('cloud')} [bold]Бэкенд:[/] {status.get('backend', 'local')}  "
+            f"{icon('folder')} [bold]Файлов:[/] {status.get('tracked_files', 0)}  "
+            f"{icon('chart')} [bold]Хранилище:[/] {storage}  "
+            f"[{enc_colors.get(enc, 'warning')}]{enc_glyph}[/]  "
+            f"{icon('profiles')} [bold]Профиль:[/] {profile}  "
+            f"{icon('clock')} [bold]Синк:[/] {last}",
             classes="status-text",
         )
     
@@ -80,19 +84,29 @@ class StatusBar(Static):
 # ── Боковая навигация (§4.1) ────────────────────────────────────────
 
 class NavRail(Vertical):
-    """Вертикальный rail с навигацией."""
-    
+    """Вертикальный rail с навигацией (иконки — Nerd Font, DESIGN.md §2)."""
+
     def compose(self):
-        yield Static("🔥", classes="nav-logo")
+        yield Static(icon("fire"), classes="nav-logo")
         yield Static("FlamQuency", classes="nav-title")
         yield Static("", classes="spacer")
-        yield Button("🔄  Синк", variant="primary", id="nav-sync", classes="nav-btn")
-        yield Button("⏪  Откат", id="nav-rollback", classes="nav-btn")
-        yield Button("📁  Версии", id="nav-versions", classes="nav-btn")
-        yield Button("🔐  Шифр", id="nav-encryption", classes="nav-btn")
-        yield Button("⚙️  Настройки", id="nav-settings", classes="nav-btn")
+        yield Button(f"{icon('sync')}  Синк", variant="primary",
+                     id="nav-sync", classes="nav-btn")
+        yield Button(f"{icon('rollback')}  Откат", id="nav-rollback",
+                     classes="nav-btn")
+        yield Button(f"{icon('versions')}  Версии", id="nav-versions",
+                     classes="nav-btn")
+        yield Button(f"{icon('shield')}  Проверка", id="nav-check",
+                     classes="nav-btn")
+        yield Button(f"{icon('update')}  Обновление", id="nav-update",
+                     classes="nav-btn")
+        yield Button(f"{icon('lock')}  Шифр", id="nav-encryption",
+                     classes="nav-btn")
+        yield Button(f"{icon('settings')}  Настройки", id="nav-settings",
+                     classes="nav-btn")
         yield Static("", classes="spacer")
-        yield Button("❌  Выход", variant="error", id="nav-exit", classes="nav-btn-exit")
+        yield Button(f"{icon('error')}  Выход", variant="error",
+                     id="nav-exit", classes="nav-btn-exit")
 
 
 # ── Базовый экран: rail + контент ───────────────────────────────────
@@ -128,7 +142,7 @@ class DashboardScreen(BaseScreen):
     
     def compose_content(self):
         return [
-            Static("🔥 FlamQuency-Sync", classes="app-title"),
+            Static(f"{icon('fire')} FlamQuency-Sync", classes="app-title"),
             Static("Синхронизация файлов с контролем версий", classes="app-subtitle"),
             Static("", classes="spacer"),
             Static("Выбери действие в панели слева →", classes="app-hint"),
@@ -142,7 +156,7 @@ class SyncScreen(BaseScreen):
     
     def compose_content(self):
         return [
-            ScreenTitle("🔥 Синхронизация", classes="screen-title"),
+            ScreenTitle(f"{icon('sync')} Синхронизация", classes="screen-title"),
             ScreenSubtitle("Запусти синхронизацию файлов и конфигов.", classes="screen-subtitle"),
             Static("", classes="spacer"),
             Static("Источник:", classes="field-label"),
@@ -175,7 +189,7 @@ class SyncScreen(BaseScreen):
         self.app.call_from_thread(progress.update, progress=100)
         
         output = (
-            f"[bold success]✅ Синхронизация завершена![/]\n\n"
+            f"[bold success]{icon('success')} Синхронизация завершена![/]\n\n"
             f"  Файлов синхронизировано:  [bold]{result.files_synced}[/]\n"
             f"  Изменено:                 [bold]{result.files_changed}[/]\n"
             f"  Исключено:                {result.files_excluded}\n"
@@ -184,7 +198,7 @@ class SyncScreen(BaseScreen):
         )
         
         if result.errors:
-            output += "\n[warning]⚠️ Ошибки:[/]\n"
+            output += f"\n[warning]{icon('warning')} Ошибки:[/]\n"
             for e in result.errors[:5]:
                 output += f"  [error]{e}[/]\n"
         
@@ -208,14 +222,14 @@ class RollbackScreen(BaseScreen):
     
     def compose_content(self):
         return [
-            ScreenTitle("⏪ Откат", classes="screen-title"),
+            ScreenTitle(f"{icon('rollback')} Откат", classes="screen-title"),
             ScreenSubtitle("Восстанови систему до снапшота.", classes="screen-subtitle"),
             Static("", classes="spacer"),
             DataTable(id="snapshots-table", cursor_type="row"),
             Static("", classes="spacer"),
             Horizontal(
                 Button("↻  Обновить", id="btn-refresh"),
-                Button("⏪  Откатить", variant="primary", id="btn-rollback"),
+                Button(f"{icon('rollback')}  Откатить", variant="primary", id="btn-rollback"),
             ),
             ResultPanel("", id="rollback-result", classes="result-box"),
         ]
@@ -250,7 +264,7 @@ class RollbackScreen(BaseScreen):
         result_widget = self.query_one("#rollback-result", ResultPanel)
         
         if table.row_count == 0:
-            result_widget.update("[warning]⚠️ Нет снапшотов для откатa[/]")
+            result_widget.update(f"[warning]{icon('warning')} Нет снапшотов для откатa[/]")
             return
         
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
@@ -265,9 +279,9 @@ class RollbackScreen(BaseScreen):
         result_widget = self.query_one("#rollback-result", ResultPanel)
         
         if success:
-            result_widget.update(f"[bold success]✅ {msg}[/]")
+            result_widget.update(f"[bold success]{icon('success')} {msg}[/]")
         else:
-            result_widget.update(f"[bold error]❌ {msg}[/]")
+            result_widget.update(f"[bold error]{icon('error')} {msg}[/]")
         
         self.app.call_from_thread(self.load_snapshots)
 
@@ -279,7 +293,7 @@ class FileVersionsScreen(BaseScreen):
     
     def compose_content(self):
         return [
-            ScreenTitle("📁 Версии файлов", classes="screen-title"),
+            ScreenTitle(f"{icon('versions')} Версии файлов", classes="screen-title"),
             ScreenSubtitle("Посмотри историю файла и откати к любой версии.", classes="screen-subtitle"),
             Static("", classes="spacer"),
             Static("Путь к файлу:", classes="field-label"),
@@ -289,7 +303,7 @@ class FileVersionsScreen(BaseScreen):
             Static("", classes="spacer"),
             DataTable(id="versions-table", cursor_type="row"),
             Static("", classes="spacer"),
-            Button("⏪  Откатить выбранную", variant="primary", id="btn-restore"),
+            Button(f"{icon('rollback')}  Откатить выбранную", variant="primary", id="btn-restore"),
             ResultPanel("", id="versions-result", classes="result-box"),
         ]
     
@@ -317,18 +331,18 @@ class FileVersionsScreen(BaseScreen):
         table.clear()
         
         if not filepath:
-            result_widget.update("[warning]⚠️ Сначала введи путь к файлу[/]")
+            result_widget.update(f"[warning]{icon('warning')} Сначала введи путь к файлу[/]")
             return
         
         success, info = self.sync.rollback_file(filepath)
         
         if not success:
-            result_widget.update(f"[error]❌ {info}[/]")
+            result_widget.update(f"[error]{icon('error')} {info}[/]")
             return
         
         if isinstance(info, dict):
             result_widget.update(
-                f"📄 [bold]{info['rel_path']}[/] — "
+                f"{icon('versions')} [bold]{info['rel_path']}[/] — "
                 f"{info['version_count']} версия(й)"
             )
             for v in info["versions"]:
@@ -345,27 +359,27 @@ class FileVersionsScreen(BaseScreen):
         table = self.query_one("#versions-table", DataTable)
         
         if not filepath:
-            result_widget.update("[warning]⚠️ Сначала введи путь к файлу[/]")
+            result_widget.update(f"[warning]{icon('warning')} Сначала введи путь к файлу[/]")
             return
         
         if table.row_count == 0:
-            result_widget.update("[warning]⚠️ Сначала загрузи версии[/]")
+            result_widget.update(f"[warning]{icon('warning')} Сначала загрузи версии[/]")
             return
         
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
         try:
             idx = int(str(row_key.value))
         except (ValueError, TypeError):
-            result_widget.update("[error]❌ Не удалось определить версию[/]")
+            result_widget.update(f"[error]{icon('error')} Не удалось определить версию[/]")
             return
         
         success, msg = self.sync.rollback_file(filepath, version_index=idx)
         
         if success:
-            result_widget.update(f"[bold success]✅ {msg}[/]")
+            result_widget.update(f"[bold success]{icon('success')} {msg}[/]")
             self.load_versions()
         else:
-            result_widget.update(f"[bold error]❌ {msg}[/]")
+            result_widget.update(f"[bold error]{icon('error')} {msg}[/]")
 
 
 # ── Экран шифрования (§5.5) ─────────────────────────────────────────
@@ -375,7 +389,7 @@ class EncryptionScreen(BaseScreen):
     
     def compose_content(self):
         return [
-            ScreenTitle("🔐 Шифрование", classes="screen-title"),
+            ScreenTitle(f"{icon('lock')} Шифрование", classes="screen-title"),
             ScreenSubtitle("Fernet/AES шифрование блобов с паролем.", classes="screen-subtitle"),
             Static("", classes="spacer"),
             Static("Статус:", classes="field-label"),
@@ -385,8 +399,8 @@ class EncryptionScreen(BaseScreen):
             Input(placeholder="Введи пароль для шифрования", password=True, id="enc-password"),
             Static("", classes="spacer"),
             Horizontal(
-                Button("🔒  Включить", variant="primary", id="btn-enc-on"),
-                Button("🔓  Выключить", variant="default", id="btn-enc-off"),
+                Button(f"{icon('lock')}  Включить", variant="primary", id="btn-enc-on"),
+                Button(f"{icon('key')}  Выключить", variant="default", id="btn-enc-of"),
             ),
             ResultPanel("", id="enc-result", classes="result-box"),
         ]
@@ -400,16 +414,16 @@ class EncryptionScreen(BaseScreen):
         widget = self.query_one("#enc-status", Static)
         
         if enc == "enabled":
-            widget.update("[bold success]🔒 Шифрование включено[/]")
+            widget.update(f"[bold success]{icon('lock')} Шифрование включено[/]")
         elif enc == "locked":
-            widget.update("[bold warning]🔐 Заблокировано — нужен пароль[/]")
+            widget.update(f"[bold warning]{icon('key')} Заблокировано — нужен пароль[/]")
         else:
-            widget.update("[dim]🔓 Шифрование выключено[/]")
+            widget.update(f"[dim]{icon('key')} Шифрование выключено[/]")
     
     def on_button_pressed(self, event):
         if event.button.id == "btn-enc-on":
             self.enable_encryption()
-        elif event.button.id == "btn-enc-off":
+        elif event.button.id == "btn-enc-of":
             self.disable_encryption()
     
     def enable_encryption(self):
@@ -417,23 +431,23 @@ class EncryptionScreen(BaseScreen):
         result_widget = self.query_one("#enc-result", ResultPanel)
         
         if not password:
-            result_widget.update("[warning]⚠️ Введи пароль[/]")
+            result_widget.update(f"[warning]{icon('warning')} Введи пароль[/]")
             return
         
         success, msg = self.sync.enable_encryption(password)
         if success:
-            result_widget.update(f"[bold success]✅ {msg}[/]")
+            result_widget.update(f"[bold success]{icon('success')} {msg}[/]")
         else:
-            result_widget.update(f"[bold error]❌ {msg}[/]")
+            result_widget.update(f"[bold error]{icon('error')} {msg}[/]")
         self.update_status()
     
     def disable_encryption(self):
         result_widget = self.query_one("#enc-result", ResultPanel)
         success, msg = self.sync.disable_encryption()
         if success:
-            result_widget.update(f"[bold success]✅ {msg}[/]")
+            result_widget.update(f"[bold success]{icon('success')} {msg}[/]")
         else:
-            result_widget.update(f"[bold error]❌ {msg}[/]")
+            result_widget.update(f"[bold error]{icon('error')} {msg}[/]")
         self.update_status()
 
 
@@ -446,7 +460,7 @@ class SettingsScreen(BaseScreen):
         config = self.sync.config
         
         return [
-            ScreenTitle("⚙️ Настройки", classes="screen-title"),
+            ScreenTitle(f"{icon('settings')} Настройки", classes="screen-title"),
             ScreenSubtitle("Конфигурация FlamQuency-Sync.", classes="screen-subtitle"),
             Static("", classes="spacer"),
             Static("[bold]Облачный бэкенд[/]", classes="settings-section"),
@@ -472,6 +486,101 @@ class SettingsScreen(BaseScreen):
         ]
 
 
+class CheckScreen(BaseScreen):
+    """Проверка целостности хранилища (аналог restic check)."""
+
+    def compose_content(self):
+        return [
+            ScreenTitle(f"{icon('shield')} Проверка целостности",
+                        classes="screen-title"),
+            ScreenSubtitle("Проверка блобов на битость и потери.",
+                           classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Button(f"{icon('shield')}  Проверить хранилище",
+                   variant="primary", id="btn-run-check"),
+            Static("", classes="spacer"),
+            ResultPanel(id="check-result"),
+        ]
+
+    def on_button_pressed(self, event):
+        if event.button.id == "btn-run-check":
+            ok, problems = self.sync.check_integrity()
+            panel = self.query_one("#check-result", ResultPanel)
+            if ok:
+                stats = self.sync.version_store.stats()
+                panel.update(
+                    f"[success]{icon('success')} Хранилище целостно[/]\n\n"
+                    f"  Блобов проверено:  [bold]{stats.get('blob_count', 0)}[/]\n"
+                    f"  Битых блобов:      0\n"
+                    f"  Размер:            {human_size(stats.get('stored_bytes', 0))}"
+                )
+            else:
+                lines = "\n".join(f"  {icon('error')} {p}" for p in problems[:15])
+                panel.update(
+                    f"[error]{icon('error')} Найдено проблем: "
+                    f"{len(problems)}[/]\n\n{lines}"
+                )
+
+
+class UpdateScreen(BaseScreen):
+    """Проверка и установка обновлений."""
+
+    def compose_content(self):
+        from flamquency import __version__
+        return [
+            ScreenTitle(f"{icon('update')} Обновление",
+                        classes="screen-title"),
+            ScreenSubtitle(f"Установлена версия: {__version__}",
+                           classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Button(f"{icon('cloud')}  Проверить обновления",
+                   variant="primary", id="btn-check-update"),
+            Static("", classes="spacer"),
+            ResultPanel(
+                f"[muted]{icon('info')} Нажми «Проверить» — сравню версию "
+                f"с GitHub.\nПроверка кэшируется на 6 часов.[/]",
+                id="update-result",
+            ),
+        ]
+
+    def on_button_pressed(self, event):
+        if event.button.id != "btn-check-update":
+            return
+        panel = self.query_one("#update-result", ResultPanel)
+        panel.update(f"[muted]{icon('cloud')} Проверяю GitHub...[/]")
+        from flamquency import __version__
+        from flamquency.updater import check_for_update
+
+        info = check_for_update(__version__)
+        if info.error and info.error != "релизов ещё не опубликовано":
+            panel.update(
+                f"[warning]{icon('warning')} {info.error}[/]\n\n"
+                f"[muted]Обновиться вручную:\n{info.url}[/]"
+            )
+        elif info.error:
+            panel.update(
+                f"[success]{icon('success')} Установлена последняя версия "
+                f"{info.current}[/]\n\n"
+                f"[muted]релизов ещё не опубликовано — обновиться можно "
+                f"через git pull[/]"
+            )
+        elif info.available:
+            notes = ""
+            if info.release_notes:
+                notes = f"\n\n[bold]Что нового:[/]\n{info.release_notes[:300]}"
+            panel.update(
+                f"[warning]{icon('update')} Доступна версия "
+                f"[bold]{info.latest}[/] (у вас {info.current})[/]\n"
+                f"[muted]Источник: {info.source}[/]{notes}\n\n"
+                f"[bold]Обновить:[/] flamquency update --yes"
+            )
+        else:
+            panel.update(
+                f"[success]{icon('success')} Установлена последняя версия "
+                f"[bold]{info.current}[/]\n[muted]Источник: {info.source}[/]"
+            )
+
+
 # ── Приложение ──────────────────────────────────────────────────────
 
 class FlamQuencyApp(App):
@@ -481,39 +590,40 @@ class FlamQuencyApp(App):
     SUB_TITLE = "File Sync with Version Control"
     
     CSS = """
-    /* Базовые поверхности (§3) */
+    /* ═══ Поверхности (§3) ═══ */
     Screen {
         background: $surface;
     }
-    
-    /* Статус-бар (§4.2) */
+
+    /* ═══ Статус-бар (§4.2): sunken + огненная линия-разделитель ═══ */
     .status-bar {
         dock: top;
         width: 100%;
         background: $surface-sunken;
         height: 1;
+        border-bottom: solid $accent-deep;
     }
-    
+
     .status-text {
         padding: 0 1;
         width: 100%;
     }
-    
-    /* Заголовки экранов (§2) */
+
+    /* ═══ Заголовки экранов (§2) ═══ */
     .screen-title {
         text-style: bold;
         color: $accent;
         padding: 1 2 0 2;
         width: 100%;
     }
-    
+
     .screen-subtitle {
         color: $text-muted;
         padding: 0 2;
         width: 100%;
     }
-    
-    /* Главный экран (§5.1) */
+
+    /* ═══ Главный экран (§5.1) ═══ */
     .app-title {
         text-align: center;
         text-style: bold;
@@ -521,33 +631,35 @@ class FlamQuencyApp(App):
         width: 100%;
         padding: 2 0 0 0;
     }
-    
+
     .app-subtitle {
         text-align: center;
         color: $text-muted;
         width: 100%;
         padding-bottom: 1;
     }
-    
+
     .app-hint {
         text-align: center;
         color: $text-faint;
         width: 100%;
     }
-    
-    /* Боковая навигация (§4.1) */
+
+    /* ═══ Боковая навигация (§4.1): глубина + стекло ═══
+       Rail на surface-raised, огненная граница справа. */
     NavRail {
         width: 22;
         background: $surface-raised;
         border-right: solid $accent-deep;
         padding: 1;
     }
-    
+
     .nav-logo {
         text-align: center;
         width: 100%;
+        color: $accent;
     }
-    
+
     .nav-title {
         text-align: center;
         text-style: bold;
@@ -555,93 +667,151 @@ class FlamQuencyApp(App):
         width: 100%;
         padding-bottom: 1;
     }
-    
+
+    /* «Прозрачность» — наложение surface-overlay на surface-raised (§1.5);
+       свечение — акцентный текст + рамка на фокусе. */
     .nav-btn {
         width: 100%;
         margin: 0 0 1 0;
         background: $surface-raised;
         color: $text;
+        border: none;
     }
-    
+
     .nav-btn:hover {
         background: $surface-overlay;
+        color: $accent-warm;
     }
-    
+
+    .nav-btn:focus {
+        background: $surface-overlay;
+        color: $accent;
+        text-style: bold;
+    }
+
     .nav-btn-exit {
         width: 100%;
         margin: 0;
+        border: none;
     }
-    
-    /* Панель результата (§4.5) */
+
+    /* ═══ Панель результата (§4.5): тень через двойную рамку (§1.5) ═══
+       Внешняя рамка accent-deep = угли-тень; фон surface-raised = стекло. */
+    ResultPanel {
+        margin: 1 2;
+        padding: 1;
+        background: $surface-raised;
+        border: solid $accent-deep;
+        min-height: 5;
+        height: auto;
+    }
+
     .result-box {
         margin: 1 2;
         padding: 1;
         background: $surface-raised;
-        border: solid $accent;
+        border: solid $accent-deep;
         min-height: 5;
     }
-    
-    /* Поля ввода */
+
+    /* ═══ Поля ввода: sunken + glow-рамка на фокусе ═══ */
     Input {
         margin: 0 2;
         background: $surface-sunken;
         border: solid $accent-deep;
     }
-    
+
     Input:focus {
         border: solid $accent;
     }
-    
-    /* Подписи полей */
+
     .field-label {
         padding: 0 2;
         color: $text-muted;
     }
-    
-    /* Таблицы (§4.4) */
+
+    /* ═══ Таблицы (§4.4): зебра, glow-курсор ═══ */
     DataTable {
         margin: 1 2;
-        background: $surface-raised;
+        background: $surface;
+        border: solid $accent-deep;
         max-height: 20;
     }
-    
+
     DataTable > .datatable--header {
-        background: $surface-overlay;
+        background: $surface-raised;
         color: $text-muted;
         text-style: bold;
     }
-    
+
     DataTable > .datatable--cursor {
-        background: $accent-deep;
+        background: $surface-overlay;
+        color: $accent;
     }
-    
-    /* Кнопки (§4.3) */
+
+    DataTable > .datatable--hover {
+        background: $surface-raised;
+    }
+
+    /* ═══ Кнопки (§4.3) ═══ */
     Button {
         margin: 0 1;
+        border: none;
     }
-    
+
     .spacer {
         height: 1;
     }
-    
-    /* Настройки */
+
+    /* ═══ Настройки ═══ */
     .settings-section {
         color: $accent;
         text-style: bold;
         padding: 0 2;
     }
-    
+
     .settings-value {
-        color: $text;
+        color: $text-muted;
         padding: 0 2;
     }
-    
-    /* Прогресс */
+
+    /* ═══ Прогресс: огненный градиент (§1.5) ═══
+       Угли → пламя → ядро: фон accent-deep, заполнение accent-hot,
+       завершение — success. */
     ProgressBar {
         margin: 0 2;
     }
+
+    ProgressBar Bar {
+        width: 40;
+    }
+
+    ProgressBar .bar--bar {
+        color: $accent-hot;
+        background: $accent-deep;
+    }
+
+    ProgressBar .bar--complete {
+        color: $success;
+    }
+
+    /* ═══ Анимации (§7) ═══
+       Textual 8.x не поддерживает @keyframes — движение задаётся
+       через transition на offset/opacity/background виджетов. */
+    .screen-title, .screen-subtitle, ResultPanel {
+        transition: offset 200ms linear, opacity 200ms linear;
+    }
+
+    /* Кнопки «дышат» лёгким сдвигом при наведении (§7) */
+    .nav-btn {
+        transition: background 150ms linear, color 150ms linear;
+    }
+
+    Input {
+        transition: border 150ms linear;
+    }
     """
-    
+
     BINDINGS = [
         Binding("ctrl+q", "quit", "Выход"),
     ]
@@ -665,6 +835,10 @@ class FlamQuencyApp(App):
             self._switch_screen(RollbackScreen(self.sync))
         elif btn_id == "nav-versions":
             self._switch_screen(FileVersionsScreen(self.sync))
+        elif btn_id == "nav-check":
+            self._switch_screen(CheckScreen(self.sync))
+        elif btn_id == "nav-update":
+            self._switch_screen(UpdateScreen(self.sync))
         elif btn_id == "nav-encryption":
             self._switch_screen(EncryptionScreen(self.sync))
         elif btn_id == "nav-settings":

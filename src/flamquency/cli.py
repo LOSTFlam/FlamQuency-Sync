@@ -18,6 +18,13 @@ from flamquency.encryption import (
 )
 from flamquency.ignore import default_ignore_path
 from flamquency.profiles import ProfileError
+from flamquency.style import (
+    get_console, banner, header, card, success_panel, error_panel,
+    warning_panel, info_panel, key_value, make_table, fire_progress,
+    human_size, human_time,
+)
+from flamquency.icons import icon
+from flamquency.updater import check_for_update, perform_update
 
 ENV_PASSWORD = "FLAMQUENCY_PASSWORD"
 
@@ -32,7 +39,7 @@ def resolve_password(args_password=None):
         return env_pw
     try:
         import getpass
-        pw = getpass.getpass("🔐 Blob store password: ")
+        pw = getpass.getpass(f"{icon('key')} Пароль хранилища: ")
         if pw:
             return pw
     except (EOFError, KeyboardInterrupt):
@@ -64,197 +71,241 @@ def get_sync_engine(config=None, password=None):
 
 def cmd_sync(args):
     """Execute synchronization."""
+    console = get_console()
     try:
         sync = get_sync_engine(password=getattr(args, "password", None))
     except (WrongPasswordError, EncryptionError) as e:
-        print(f"🔐 {e}")
+        console.print(error_panel(console, str(e), title="Хранилище зашифровано",
+                                  icon_name="lock"))
         return 1
 
     source = Path(args.source) if args.source else None
     profile = getattr(args, "profile", None)
-    print(f"🔥 Starting sync...")
+    console.print(header(console, "Синхронизация", icon_name="sync"))
     if profile:
-        print(f"   Profile: {profile}")
+        console.print(f"   [fq.label]Профиль:[/] [fq.warm]{profile}[/]")
     if source:
-        print(f"   Source: {source}")
+        console.print(f"   [fq.label]Источник:[/] [fq.warm]{source}[/]")
     elif profile:
-        print("   Paths: from profile")
+        console.print("   [fq.label]Пути: из профиля[/]")
     else:
-        print("   Paths: from active profile (~/.flamquency by default)")
+        console.print("   [fq.label]Пути: активный профиль (~/.flamquency)[/]")
 
     try:
         result = sync.sync(source=source, profile=profile)
     except EncryptionLockedError as e:
-        print(f"🔐 {e}")
+        console.print(error_panel(console, str(e), icon_name="lock"))
         return 1
     except DecryptionError as e:
-        print(f"🔐 {e}")
+        console.print(error_panel(console, str(e), icon_name="lock"))
         return 1
     except ProfileError as e:
-        print(f"❌ {e}")
+        console.print(error_panel(console, str(e)))
         return 1
 
-    print(f"\n✅ Sync complete!")
-    if result.profile:
-        print(f"   Profile:      {result.profile}")
-    print(f"   Files synced:   {result.files_synced}")
-    print(f"   Files changed:  {result.files_changed}")
-    print(f"   Files excluded: {result.files_excluded}")
-    print(f"   Blobs stored:   {result.blobs_stored}")
+    if result.errors:
+        console.print(error_panel(
+            console,
+            f"Файлов: {result.files_synced} · ошибок: {len(result.errors)}",
+            title="Синхронизация с ошибками", icon_name="warning"))
+        for e in result.errors[:5]:
+            console.print(f"   [fq.error]{icon('error')} {e}[/]")
+    else:
+        rows = [
+            ("Профиль", result.profile or "—"),
+            ("Файлов синхронизировано", result.files_synced),
+            ("Файлов изменено", result.files_changed),
+            ("Файлов исключено", result.files_excluded),
+            ("Блобов записано", result.blobs_stored),
+        ]
+        if result.paths:
+            rows.append(("Путей", len(result.paths)))
+        console.print(success_panel(
+            console, key_value(rows),
+            title="Синхронизация завершена", icon_name="success"))
 
     if result.paths:
-        print("\n   Per path:")
-        for entry in result.paths:
-            print(f"      [{entry['label']}] {entry['files_synced']} file(s) — {entry['path']}")
-    
-    if result.errors:
-        print(f"\n⚠️  {len(result.errors)} error(s):")
-        for e in result.errors[:5]:
-            print(f"   {e}")
-    
+        table = make_table(
+            ["Путь", "Файлов"],
+            [(f"{icon('folder')} {e['label']}", e['files_synced'])
+             for e in result.paths],
+        )
+        console.print(table)
+
     return 0 if not result.errors else 1
 
 
 def cmd_rollback(args):
     """Rollback to snapshot."""
+    console = get_console()
     sync = get_sync_engine()
     snapshots = sync.list_snapshots()
-    
+
     if not snapshots:
-        print("❌ No snapshots available")
+        console.print(warning_panel(
+            console, "Снапшотов нет. Сначала выполните синхронизацию: "
+                      "flamquency sync",
+            title="Нет снапшотов", icon_name="warning"))
         return 1
-    
+
     if args.list:
-        print("📸 Available snapshots:")
-        for i, snap in enumerate(reversed(snapshots)):
-            ts = snap["timestamp"][:19].replace("T", " ")
-            print(f"   [{i}] {ts}  ({snap['file_count']} files)")
+        _print_snapshot_table(console, snapshots)
         return 0
-    
+
     if args.snapshot is not None:
         if 0 <= args.snapshot < len(snapshots):
             snap = snapshots[args.snapshot]
-            print(f"⏪ Rolling back to {snap['name']}...")
+            console.print(f"[fq.label]{icon('rollback')} Откат к снапшоту[/] "
+                          f"[fq.warm]{snap['name']}[/]...")
             success, msg = sync.rollback_to_snapshot(snap["name"])
-            print(f"{'✅' if success else '❌'} {msg}")
+            if success:
+                console.print(success_panel(console, msg, icon_name="success"))
+            else:
+                console.print(error_panel(console, msg))
             return 0 if success else 1
         else:
-            print(f"❌ Invalid snapshot index: {args.snapshot}")
+            console.print(error_panel(
+                console, f"Неверный индекс снапшота: {args.snapshot}"))
             return 1
-    
-    # No snapshot specified — show list
-    print("Available snapshots:")
+
+    _print_snapshot_table(console, snapshots)
+    console.print("\n[fq.faint]Используйте: flamquency rollback --snapshot N[/]")
+    return 0
+
+
+def _print_snapshot_table(console, snapshots):
+    """Единая таблица снапшотов (новые сверху) для CLI."""
+    rows = []
     for i, snap in enumerate(reversed(snapshots)):
         ts = snap["timestamp"][:19].replace("T", " ")
-        print(f"   [{i}] {ts}  ({snap['file_count']} files)")
-    print("\nUse: flamquency rollback --snapshot N")
-    return 0
+        rows.append((f"[fq.accent]{i}[/]", ts, snap["file_count"]))
+    table = make_table(["#", "Время", "Файлов"], rows)
+    console.print(card(console, table, title=f"{icon('history')} Снапшоты"))
 
 
 def cmd_rollback_file(args):
     """Rollback specific file."""
+    console = get_console()
     try:
         sync = get_sync_engine(password=getattr(args, "password", None))
     except (WrongPasswordError, EncryptionError) as e:
-        print(f"🔐 {e}")
+        console.print(error_panel(console, str(e), title="Хранилище зашифровано",
+                                  icon_name="lock"))
         return 1
 
     filepath = Path(args.file).expanduser()
-    
+
     if args.list:
         success, info = sync.rollback_file(str(filepath))
         if not success:
-            print(f"❌ {info}")
+            console.print(error_panel(console, str(info)))
             return 1
-        
+
         if isinstance(info, dict):
-            print(f"📄 {info['rel_path']}")
-            print(f"   {info['version_count']} version(s):\n")
-            for v in info["versions"]:
-                ts = v["timestamp"][:19].replace("T", " ")
-                print(f"   [{v['index']}] {ts}  hash:{v['hash']}  size:{v['size']}")
+            rows = [
+                (v["index"], v["timestamp"][:19].replace("T", " "),
+                 v["hash"][:12], human_size(v["size"]))
+                for v in info["versions"]
+            ]
+            console.print(card(
+                console, make_table(["Версия", "Время", "Хеш", "Размер"], rows),
+                title=f"{icon('versions')} {info['rel_path']} "
+                      f"— {info['version_count']} версий"))
         return 0
-    
+
     if args.version is not None:
         success, msg = sync.rollback_file(str(filepath), version_index=args.version)
-        print(f"{'✅' if success else '❌'} {msg}")
+        if success:
+            console.print(success_panel(console, msg, icon_name="success"))
+        else:
+            console.print(error_panel(console, msg))
         return 0 if success else 1
-    
+
     # Show versions
     success, info = sync.rollback_file(str(filepath))
     if success and isinstance(info, dict):
-        print(f"📄 {info['rel_path']} — {info['version_count']} version(s)")
-        print("Use: flamquency rollback-file FILE --version N")
+        console.print(f"[fq.label]{icon('versions')} {info['rel_path']} — "
+                      f"{info['version_count']} версий[/]")
+        console.print("[fq.faint]Используйте: flamquency rollback-file FILE "
+                      "--version N[/]")
         return 0
-    print(f"❌ {info}")
+    console.print(error_panel(console, str(info)))
     return 1
 
 
 def cmd_status(args):
     """Show sync status."""
+    console = get_console()
     sync = get_sync_engine()
     status = sync.status()
-    
-    print("🔥 FlamQuency-Sync Status")
-    print(f"   Backend:      {status.get('backend', 'local')}")
-    print(f"   Last sync:    {status.get('last_sync', 'Never')}")
-    print(f"   Tracked:      {status.get('tracked_files', 0)} files")
-    print(f"   Blobs:        {status.get('blob_count', 0)}")
-    storage_mb = status.get("storage_bytes", 0) / (1024 * 1024)
-    print(f"   Storage:      {storage_mb:.2f} MB")
 
-    # Encryption
+    storage = status.get("storage_bytes", 0)
     enc = status.get("encryption", "disabled")
-    enc_icons = {"enabled": "🔒", "locked": "🔐", "disabled": "🔓"}
-    print(f"   Encryption:   {enc_icons.get(enc, '🔓')} {enc}")
+    enc_glyph = {"enabled": icon("lock"), "locked": icon("key"),
+                 "disabled": icon("warning")}[enc]
+    enc_color = {"enabled": "fq.success", "locked": "fq.warning",
+                 "disabled": "fq.faint"}[enc]
 
-    # Snapshots
     snapshots = sync.list_snapshots()
-    print(f"   Snapshots:    {len(snapshots)}")
 
-    # Ignore rules
+    rows = [
+        ("Бэкенд", f"[fq.warm]{status.get('backend', 'local')}[/]"),
+        ("Последний синк", human_time(status.get("last_sync"))),
+        ("Отслеживается файлов", f"[bold]{status.get('tracked_files', 0)}[/]"),
+        ("Блобов", status.get("blob_count", 0)),
+        ("Хранилище", f"[bold]{human_size(storage)}[/]"),
+        ("Шифрование", f"[{enc_color}]{enc_glyph} {enc}[/]"),
+        ("Снапшотов", f"[bold]{len(snapshots)}[/]"),
+    ]
     ig_file = status.get("ignore_file")
+    rows.append(("Ignore-файл", ig_file or "[fq.faint]~/.flamquencyignore "
+                                       f"({icon('warning')} не создан)[/]"))
     if ig_file:
-        print(f"   Ignore file:  {ig_file} ({status.get('ignore_rules', 0)} rules)")
-    else:
-        print(f"   Ignore file:  ~/.flamquencyignore (not created yet)")
-
-    # Profiles
+        rows[-1] = ("Ignore-файл",
+                    f"{ig_file} ([fq.warm]{status.get('ignore_rules', 0)}[/] правил)")
     profiles = status.get("profiles", [])
     active = status.get("active_profile", "default")
-    print(f"   Profile:      {active} ({len(profiles)} total: {', '.join(profiles)})")
+    rows.append(("Профиль", f"[fq.warm]{active}[/] "
+                            f"[fq.faint]({len(profiles)} шт)[/]"))
 
-    return 0
+    console.print(banner(console, "FlamQuency-Sync", "статус системы",
+                         icon_name="status"))
+    console.print(card(console, key_value(rows),
+                       title=f"{icon('chart')} Состояние"))
 
 
 def cmd_diff(args):
     """Diff two versions of a file."""
+    console = get_console()
     sync = get_sync_engine()
     filepath = Path(args.file).expanduser()
-    
+
     success, diff = sync.diff_file(str(filepath), args.v1, args.v2)
     if not success:
-        print(f"❌ {diff}")
+        console.print(error_panel(console, str(diff)))
         return 1
-    
-    print(diff)
+
+    console.print(card(console, Text(diff, style="fq.body"),
+                       title=f"{icon('eye')} {filepath.name}: "
+                             f"v{args.v1} → v{args.v2}",
+                       icon_name="eye"))
     return 0
 
 
 def cmd_snapshots(args):
     """List snapshots."""
+    console = get_console()
     sync = get_sync_engine()
     snapshots = sync.list_snapshots()
-    
+
     if not snapshots:
-        print("No snapshots available")
+        console.print(warning_panel(
+            console, "Снапшотов нет. Сначала выполните синхронизацию: "
+                      "flamquency sync",
+            title="Нет снапшотов", icon_name="warning"))
         return 0
-    
-    print(f"📸 {len(snapshots)} snapshot(s):")
-    for i, snap in enumerate(reversed(snapshots)):
-        ts = snap["timestamp"][:19].replace("T", " ")
-        print(f"   [{i}] {ts}  ({snap['file_count']} files)")
-    
+
+    _print_snapshot_table(console, snapshots)
     return 0
 
 
@@ -264,7 +315,7 @@ def cmd_watch(args):
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
     except ImportError:
-        print("❌ Watch mode requires 'watchdog'. Install: pip install watchdog")
+        console.print(error_panel(console, "Режим watch требует watchdog: pip install watchdog"))
         return 1
     
     sync = get_sync_engine()
@@ -287,7 +338,7 @@ def cmd_watch(args):
             
             print(f"🔄 Change detected: {event.src_path}")
             result = sync.sync()
-            print(f"   ✅ Synced {result.files_synced} files")
+            console.print(f"   [fq.success]{icon('success')}[/] Синхронизировано {result.files_synced} файлов")
     
     observer = Observer()
     handler = SyncHandler()
@@ -297,10 +348,10 @@ def cmd_watch(args):
             observer.schedule(handler, str(path), recursive=True)
             print(f"👁 Watching: {path}")
         else:
-            print(f"⚠️ Path not found: {path}")
+            console.print(f"   [fq.warning]{icon('warning')}[/] Путь не найден: {path}")
     
     observer.start()
-    print("\n🔥 Watch mode active. Press Ctrl+C to stop.\n")
+    console.print(f"\n[bold]{icon('sync')} Watch-режим активен. Ctrl+C — стоп.[/]\n")
     
     try:
         while True:
@@ -308,7 +359,7 @@ def cmd_watch(args):
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
-        print("\n👋 Watch mode stopped")
+        console.print(f"\n[fq.label]{icon('error')} Watch-режим остановлен[/]")
     
     observer.join()
     return 0
@@ -323,88 +374,89 @@ def cmd_encryption(args):
     if action == "status":
         mgr = EncryptionManager(store_dir)
         if not mgr.is_configured:
-            print("🔓 Encryption: DISABLED (blobs stored in plaintext)")
+            console.print(f"   {icon('warning')} Шифрование: ВЫКЛЮЧЕНО (блобы в открытом виде)")
         elif mgr.is_unlocked:
-            print("🔒 Encryption: ENABLED and UNLOCKED")
+            console.print(f"   {icon('lock')} Шифрование: ВКЛЮЧЕНО и РАЗБЛОКИРОВАНО")
         else:
-            print("🔒 Encryption: ENABLED but LOCKED (password required)")
+            console.print(f"   {icon('key')} Шифрование: ВКЛЮЧЕНО, но ЗАБЛОКИРОВАНО (нужен пароль)")
         print(f"   Key file: {mgr.key_path}")
         return 0
 
     if action == "enable":
         mgr = EncryptionManager(store_dir)
         if mgr.is_configured:
-            print("❌ Encryption is already enabled")
+            console.print(error_panel(console, "Шифрование уже включено"))
             return 1
         password = resolve_password(args.password)
         if not password:
-            print("❌ A password is required to enable encryption")
+            console.print(error_panel(console, "Для включения шифрования нужен пароль"))
             return 1
         mgr = EncryptionManager.enable(store_dir, password)
         config["encryption"] = {"enabled": True}
         save_config(config)
-        print("🔒 Encryption enabled!")
-        print("   New blobs will be encrypted with AES-128 (Fernet).")
+        console.print(success_panel(console, "Шифрование включено!", title="Шифрование", icon_name="lock"))
+        console.print("   [fq.faint]Новые блобы будут шифроваться AES-128 (Fernet).[/]")
         print(f"   Key file: {mgr.key_path} (keep it safe — no password, no data)")
         return 0
 
     if action == "disable":
         mgr = EncryptionManager(store_dir)
         if not mgr.is_configured:
-            print("❌ Encryption is not enabled")
+            console.print(error_panel(console, "Шифрование не включено"))
             return 1
         password = resolve_password(args.password)
         if not password:
-            print("❌ A password is required to disable encryption")
+            console.print(error_panel(console, "Для отключения шифрования нужен пароль"))
             return 1
         try:
             mgr.unlock(password)
         except WrongPasswordError:
-            print("❌ Wrong password")
+            console.print(error_panel(console, "Неверный пароль"))
             return 1
         sync = get_sync_engine(config=config, password=password)
         decrypted = sync.version_store.blob_store.disable_encryption(mgr)
         config["encryption"] = {"enabled": False}
         save_config(config)
-        print(f"🔓 Encryption disabled — {decrypted} blob(s) decrypted in place")
+        console.print(success_panel(console, f"Шифрование отключено — {decrypted} блобов расшифровано на месте", title="Шифрование", icon_name="key"))
         return 0
 
     if action == "change-password":
         mgr = EncryptionManager(store_dir)
         if not mgr.is_configured:
-            print("❌ Encryption is not enabled")
+            console.print(error_panel(console, "Шифрование не включено"))
             return 1
         old_pw = resolve_password(args.password)
         if not old_pw:
-            print("❌ Current password is required")
+            console.print(error_panel(console, "Требуется текущий пароль"))
             return 1
         try:
             mgr.unlock(old_pw)
         except WrongPasswordError:
-            print("❌ Wrong password")
+            console.print(error_panel(console, "Неверный пароль"))
             return 1
         import getpass
-        new_pw = args.new_password or getpass.getpass("🔐 New password: ")
+        new_pw = args.new_password or getpass.getpass(f"{icon('key')} Новый пароль: ")
         if not new_pw:
-            print("❌ New password must not be empty")
+            console.print(error_panel(console, "Новый пароль не может быть пустым"))
             return 1
         if not args.new_password:
-            confirm = getpass.getpass("🔐 Confirm new password: ")
+            confirm = getpass.getpass(f"{icon('key')} Подтвердите пароль: ")
             if new_pw != confirm:
-                print("❌ Passwords do not match")
+                console.print(error_panel(console, "Пароли не совпадают"))
                 return 1
         new_mgr = mgr.change_password(new_pw)
         sync = get_sync_engine(config=config, password=new_pw)
         rekeyed = sync.version_store.blob_store.rekey(mgr, new_mgr)
-        print(f"🔑 Password changed — {rekeyed} blob(s) re-encrypted")
+        console.print(success_panel(console, f"Пароль изменён — {rekeyed} блобов перешифровано", title="Шифрование", icon_name="key"))
         return 0
 
-    print(f"❌ Unknown encryption action: {action}")
+    console.print(error_panel(console, f"Неизвестное действие: {action}"))
     return 1
 
 
 def cmd_ignore(args):
     """Manage ~/.flamquencyignore — init / add / check / list."""
+    console = get_console()
     from flamquency.ignore import (
         IgnoreRules, IGNORE_FILENAME, default_ignore_path,
         default_template, write_default_ignore_file,
@@ -417,12 +469,12 @@ def cmd_ignore(args):
     if getattr(args, "init", False):
         written = write_default_ignore_file(path, force=getattr(args, "force", False))
         if written is None:
-            print(f"⚠️  {path} already exists — nothing written")
-            print("   Use --force to overwrite with the default template")
+            console.print(warning_panel(console, f"{path} уже существует — ничего не записано"))
+            console.print("   [fq.faint]Используйте --force для перезаписи шаблоном[/]")
             return 1
         rules = IgnoreRules.from_file(written)
         print(f"📝 Created {written} ({len(rules)} rules)")
-        print("   Syntax works like .gitignore — edit it any time")
+        console.print("   [fq.faint]Синтаксис как у .gitignore — редактируйте когда угодно[/]")
         return 0
 
     # ── --add: append one pattern ──────────────────────────────
@@ -433,8 +485,8 @@ def cmd_ignore(args):
         with open(path, "a") as f:
             f.write(f"\n{args.add.strip()}\n")
         rules = IgnoreRules.from_file(path)
-        print(f"➕ Added '{args.add.strip()}' → {path}")
-        print(f"   {len(rules)} rule(s) total")
+        console.print(success_panel(console, f"Добавлено '{args.add.strip()}' → {path}", icon_name="success"))
+        console.print(f"   [fq.faint]Всего правил: {len(rules)}[/]")
         return 0
 
     # ── --check: explain one path ──────────────────────────────
@@ -443,24 +495,24 @@ def cmd_ignore(args):
         target = args.check
         ignored, rule = rules.explain(target)
         if ignored:
-            print(f"🚫 IGNORED:    {target}")
+            console.print(f"   [fq.warning]{icon('warning')}[/] ИГНОРИРУЕТСЯ: {target}")
             if rule is not None:
-                print(f"   by rule: {rule.raw}")
+                console.print(f"   [fq.faint]по правилу: {rule.raw}[/]")
         elif rule is not None:
-            print(f"✅ NOT IGNORED: {target}")
-            print(f"   re-included by: {rule.raw}")
+            console.print(f"   [fq.success]{icon('success')}[/] НЕ ИГНОРИРУЕТСЯ: {target}")
+            console.print(f"   [fq.faint]возвращено правилом: {rule.raw}[/]")
         else:
-            print(f"✅ NOT IGNORED: {target}")
-            print(f"   (no rule matches — {len(rules)} rule(s) checked)")
+            console.print(f"   [fq.success]{icon('success')}[/] НЕ ИГНОРИРУЕТСЯ: {target}")
+            console.print(f"   [fq.faint](правило не найдено — проверено {len(rules)} правил)[/]")
         return 0
 
     # ── --list / default: show the rules ───────────────────────
     rules = IgnoreRules.from_file(path)
     if not path.exists():
-        print(f"📄 No ignore file yet at {path}")
-        print("   Create one with: flamquency ignore --init")
+        console.print(f"   {icon('versions')} Ignore-файла ещё нет: {path}")
+        console.print("   [fq.faint]Создать: flamquency ignore --init[/]")
         return 0
-    print(f"📄 {path} — {len(rules)} rule(s)")
+    console.print(card(console, "\n".join(f"   {r}" for r in rules), title=f"{icon('versions')} {path} — {len(rules)} правил"))
     if not rules:
         return 0
     for rule in rules:
@@ -477,7 +529,7 @@ def cmd_ignore(args):
 
 
 def cmd_profile(args):
-    """Manage sync profiles — named sets of paths for different scenarios."""
+    console = get_console()
     from flamquency.profiles import (
         ProfileError, add_path, active_name, create_profile, delete_profile,
         ensure_profiles, get_profile, profile_names, remove_path,
@@ -514,14 +566,14 @@ def cmd_profile(args):
                 if extra:
                     print(f"      excludes: {', '.join(extra)}")
             print(f"\n   Active: {active}")
-            print("   Switch with: flamquency profile use NAME")
+            console.print("   [fq.faint]Переключить: flamquency profile use ИМЯ[/]")
             return 0
 
         if action == "create":
             name = args.name
             paths = profile_paths_arg()
             if not paths:
-                print("❌ At least one path is required to create a profile")
+                console.print(error_panel(console, "Для создания профиля нужен хотя бы один путь"))
                 return 1
             prof = create_profile(config, name, paths,
                                   description=getattr(args, "description", ""),
@@ -544,30 +596,31 @@ def cmd_profile(args):
             name = args.name
             set_active(config, name)
             save()
-            print(f"✅ Active profile: {name}")
-            print("   `flamquency sync` now follows this profile")
+            console.print(success_panel(console, f"Активный профиль: {name}", icon_name="profiles"))
+            console.print("   [fq.faint]`flamquency sync` теперь следует этому профилю[/]")
             return 0
 
         if action == "add-path":
             name = args.name
             paths = profile_paths_arg()
             if not paths:
-                print("❌ At least one path is required")
+                console.print(error_panel(console, "Нужен хотя бы один путь"))
                 return 1
             for p in paths:
                 add_path(config, name, p)
             save()
             prof = get_profile(config, name)
-            print(f"➕ Profile '{name}' now has {len(prof['paths'])} path(s):")
+            console.print(f"   {icon('profiles')} Профиль '{name}' — "
+                          f"{len(prof['paths'])} путей:")
             for p in prof["paths"]:
-                print(f"      {p}")
+                console.print(f"      [fq.warm]{p}[/]")
             return 0
 
         if action == "remove-path":
             name = args.name
             paths = profile_paths_arg()
             if not paths:
-                print("❌ At least one path is required")
+                console.print(error_panel(console, "Нужен хотя бы один путь"))
                 return 1
             for p in paths:
                 remove_path(config, name, p)
@@ -602,11 +655,11 @@ def cmd_profile(args):
             print(f"📝 Profile '{name}' description updated")
             return 0
 
-        print(f"❌ Unknown profile action: {action}")
+        console.print(error_panel(console, f"Неизвестное действие профиля: {action}"))
         return 1
 
     except ProfileError as e:
-        print(f"❌ {e}")
+        console.print(error_panel(console, str(e)))
         return 1
 
 
@@ -620,7 +673,7 @@ def cmd_config(args):
         os.system(f"{editor} {config_path}")
         return 0
     
-    print("🔥 FlamQuency-Sync Configuration")
+    console.print(banner(console, "Конфигурация", icon_name="settings"))
     print(f"   Config file: ~/.flamquency/config.yaml\n")
     print(json.dumps(config, indent=2, default=str))
     return 0
@@ -638,16 +691,16 @@ def cmd_init(args):
     if not ignore_path.exists() and not args.skip_ignore:
         from flamquency.ignore import default_template
         ignore_path.write_text(default_template())
-        print(f"✅ Created {ignore_path}")
+        console.print(success_panel(console, f"Создан {ignore_path}", icon_name="folder"))
     elif ignore_path.exists():
-        print(f"ℹ️  Ignore file exists: {ignore_path}")
+        console.print(info_panel(console, f"Ignore-файл существует: {ignore_path}"))
 
     # 2. Retention defaults (если не заданы)
     retention = config.get("retention")
     if not retention:
         config["retention"] = {"keep_last": args.keep_last}
         save_config(config)
-        print(f"✅ Retention: keep last {args.keep_last} snapshots")
+        console.print(success_panel(console, f"Хранение: последние {args.keep_last} снапшотов", icon_name="clock"))
 
     # 3. Опционально: git-репозиторий для снапшотов
     if args.git:
@@ -655,64 +708,231 @@ def cmd_init(args):
         if not (snapshots_dir / ".git").exists():
             import subprocess
             subprocess.run(["git", "init", "-q"], cwd=snapshots_dir, check=False)
-            print(f"✅ Git repo initialized in {snapshots_dir}")
+            console.print(success_panel(console, f"Git-репозиторий создан в {snapshots_dir}", icon_name="branch"))
         else:
-            print(f"ℹ️  Git repo already exists in {snapshots_dir}")
+            console.print(info_panel(console, f"Git-репозиторий уже существует в {snapshots_dir}"))
 
-    print("\n🔥 FlamQuency-Sync initialized!")
+    console.print(banner(console, "FlamQuency-Sync", "инициализация завершена", icon_name="fire"))
     print(f"   Config:  {config_dir / 'config.yaml'}")
     print(f"   Ignore:  {ignore_path}")
     print(f"   Snapshots: {config_dir / 'snapshots'}")
-    print("\nNext steps:")
-    print("   1. flamquency status          — проверить состояние")
-    print("   2. flamquency sync            — первый синк")
-    print("   3. flamquency-tui             — запустить TUI")
+    console.print("\n[fq.section]Что дальше:[/]")
+    console.print(f"   [fq.accent]1.[/] flamquency status          — проверить состояние")
+    console.print(f"   [fq.accent]2.[/] flamquency sync            — первый синк")
+    console.print(f"   [fq.accent]3.[/] flamquency-tui             — запустить TUI")
     return 0
 
 
 def cmd_prune(args):
-    """Prune old snapshots (retention policy)."""
+    """Prune old snapshots (restic-style retention policy)."""
+    console = get_console()
     sync = get_sync_engine()
 
-    keep_last = args.keep_last
-    older_than = args.older_than
+    # Параметры из CLI или конфига
+    policy = {}
+    for key, attr in (
+        ("keep_last", "keep_last"),
+        ("older_than_days", "older_than"),
+        ("keep_hourly", "keep_hourly"),
+        ("keep_daily", "keep_daily"),
+        ("keep_weekly", "keep_weekly"),
+        ("keep_monthly", "keep_monthly"),
+        ("keep_yearly", "keep_yearly"),
+        ("keep_within", "keep_within"),
+    ):
+        val = getattr(args, attr, None)
+        if val is not None:
+            policy[key] = val
 
-    if keep_last is None and older_than is None:
-        retention = (sync.config.get("retention") or {})
-        keep_last = retention.get("keep_last")
-        older_than = retention.get("older_than_days")
+    if not policy:
+        policy = dict(sync.config.get("retention") or {})
 
-    if keep_last is None and older_than is None:
-        print("❌ No retention policy set. Use --keep-last N or --older-than DAYS")
-        print("   Or set retention in ~/.flamquency/config.yaml")
+    if not policy:
+        console.print(error_panel(
+            console,
+            "Политика хранения не задана.\n"
+            "Используйте: flamquency prune --keep-last 5 --keep-daily 7 "
+            "--keep-weekly 4 --keep-monthly 12\n"
+            "или задайте retention в ~/.flamquency/config.yaml",
+            title="Нет политики хранения", icon_name="warning"))
         return 1
 
-    if args.dry_run:
-        snapshots = sync.list_snapshots()
-        total = len(snapshots)
-        print(f"📸 {total} snapshot(s) on disk")
-        if keep_last is not None:
-            excess = max(0, total - keep_last)
-            print(f"   Would prune {excess} (keeping last {keep_last})")
-        if older_than is not None:
-            print(f"   Would prune older than {older_than} days")
-        if not args.yes:
-            confirm = input("Continue? [y/N] ")
-            if confirm.lower() != "y":
-                print("Cancelled")
-                return 0
-        deleted, msg = sync.prune_snapshots(keep_last, older_than)
-    else:
-        deleted, msg = sync.prune_snapshots(keep_last, older_than)
+    snapshots = sync.list_snapshots()
+    policy_rows = [(k.replace("_", " "), v) for k, v in policy.items()]
 
-    print(f"🧹 {msg}")
+    console.print(banner(console, "Очистка снапшотов",
+                         f"всего на диске: {len(snapshots)}",
+                         icon_name="trash"))
+    console.print(card(console, key_value(policy_rows),
+                       title=f"{icon('clock')} Политика хранения"))
+
+    if args.dry_run:
+        console.print(info_panel(
+            console, "Режим предпросмотра — ничего не удалено. "
+                      "Повторите без --dry-run для применения.",
+            title="Dry-run", icon_name="info"))
+        if not args.yes:
+            confirm = input("Применить политику? [y/N] ")
+            if confirm.lower() != "y":
+                console.print("[fq.faint]Отменено[/]")
+                return 0
+        deleted, msg = sync.prune_snapshots(**policy)
+    else:
+        if not args.yes:
+            confirm = input(f"Удалить снапшоты по политике? [y/N] ")
+            if confirm.lower() != "y":
+                console.print("[fq.faint]Отменено[/]")
+                return 0
+        deleted, msg = sync.prune_snapshots(**policy)
+
+    if deleted:
+        console.print(success_panel(console, msg, icon_name="trash"))
+    else:
+        console.print(info_panel(console, msg, icon_name="info"))
     return 0
+
+
+def cmd_check(args):
+    """Проверка целостности хранилища (аналог restic check)."""
+    console = get_console()
+    sync = get_sync_engine()
+
+    console.print(banner(console, "Проверка целостности", icon_name="shield"))
+    ok, problems = sync.check_integrity()
+
+    if ok:
+        stats = sync.version_store.stats()
+        console.print(success_panel(
+            console,
+            key_value([
+                ("Блобов проверено", stats.get("blob_count", 0)),
+                ("Битых блобов", 0),
+                ("Размер хранилища", human_size(stats.get("stored_bytes", 0))),
+            ]),
+            title="Хранилище целостно", icon_name="success"))
+        return 0
+
+    console.print(error_panel(
+        console,
+        "\n".join(f"{icon('error')} {p}" for p in problems[:20]),
+        title=f"Найдено проблем: {len(problems)}",
+        icon_name="error"))
+    return 1
+
+
+def cmd_stats(args):
+    """Статистика хранилища: дедупликация, размер, шифрование."""
+    console = get_console()
+    sync = get_sync_engine()
+    stats = sync.version_store.stats()
+
+    saved = stats.get("uncompressed_bytes", 0) - stats.get("stored_bytes", 0)
+    saved_pct = 0
+    if stats.get("uncompressed_bytes"):
+        saved_pct = 100.0 * saved / stats["uncompressed_bytes"]
+    # На крошечных файлах метаданные блобов весят больше содержимого —
+    # отрицательная экономия честная, но подаём её нейтрально
+    if saved >= 0:
+        saved_label = f"[fq.success]{human_size(saved)} ({saved_pct:.1f}%)[/]"
+    else:
+        saved_label = (f"[fq.warning]{human_size(saved)} "
+                       f"({saved_pct:.1f}%)[/] [fq.faint]файлы мельче метаданных[/]")
+
+    rows = [
+        ("Блобов", f"[bold]{stats.get('blob_count', 0)}[/]"),
+        ("Исходный размер", human_size(stats.get("uncompressed_bytes", 0))),
+        ("На диске", f"[bold]{human_size(stats.get('stored_bytes', 0))}[/]"),
+        ("Сэкономлено", saved_label),
+        ("Коэффициент", f"{stats.get('ratio', 0):.2f}x"),
+        ("Зашифровано блобов", stats.get("encrypted_blobs", 0)),
+    ]
+    console.print(banner(console, "Статистика хранилища",
+                         "дедупликация и использование места",
+                         icon_name="chart"))
+    console.print(card(console, key_value(rows),
+                       title=f"{icon('chart')} Blob store"))
+    return 0
+
+
+def cmd_update(args):
+    """Проверка и установка обновлений."""
+    console = get_console()
+    from flamquency import __version__
+
+    console.print(banner(console, "Обновление",
+                         f"установлена версия {__version__}",
+                         icon_name="update"))
+
+    if args.check:
+        console.print(f"[fq.label]{icon('cloud')} Проверяю GitHub...[/]")
+        info = check_for_update(__version__, use_cache=not args.no_cache)
+        _print_update_info(console, info)
+        return 0
+
+    # Полная проверка + установка
+    console.print(f"[fq.label]{icon('cloud')} Проверяю обновления...[/]")
+    info = check_for_update(__version__, use_cache=not args.no_cache)
+    _print_update_info(console, info)
+
+    if not info.available:
+        return 0
+
+    if not args.yes:
+        confirm = input(f"\nОбновить {info.current} → {info.latest}? [y/N] ")
+        if confirm.lower() != "y":
+            console.print("[fq.faint]Отменено[/]")
+            return 0
+
+    console.print(f"[fq.label]{icon('download')} Скачиваю {info.latest}...[/]")
+    ok, msg = perform_update(dry_run=args.dry_run)
+    if ok:
+        console.print(success_panel(console, msg, icon_name="update"))
+    else:
+        console.print(error_panel(console, msg, icon_name="error"))
+    return 0 if ok else 1
+
+
+def _print_update_info(console, info):
+    """Единый вывод результата проверки обновлений."""
+    # Репо доступен, но релизов ещё нет — это не ошибка
+    if info.error == "релизов ещё не опубликовано":
+        console.print(success_panel(
+            console,
+            f"Установлена последняя версия [bold]{info.current}[/]\n"
+            f"[fq.faint]релизов в репозитории ещё не опубликовано — "
+            f"обновиться можно через git pull[/]",
+            title="Обновлений нет", icon_name="success"))
+        return
+    if info.error:
+        console.print(warning_panel(
+            console, f"{info.error}\n\nПроверьте соединение или обновите "
+                      f"вручную:\n{info.url}",
+            title="Не удалось проверить", icon_name="warning"))
+        return
+    if info.available:
+        notes = ""
+        if info.release_notes:
+            notes = f"\n\n[fq.label]Что нового:[/]\n{info.release_notes}"
+        console.print(info_panel(
+            console,
+            f"Доступна версия [bold]{info.latest}[/] "
+            f"(у вас {info.current})\n"
+            f"Источник: {info.source}{notes}\n\n"
+            f"Обновить: flamquency update --yes",
+            title=f"{icon('update')} Новая версия",
+            icon_name="update"))
+    else:
+        console.print(success_panel(
+            console, f"Установлена последняя версия "
+                      f"[bold]{info.current}[/]\n"
+                      f"Источник: {info.source}",
+            title="Обновлений нет", icon_name="success"))
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="flamquency",
-        description="🔥 Terminal-based file synchronization with version control",
+        description=f"{icon('fire')} Terminal-based file synchronization with version control",
     )
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -757,12 +977,36 @@ def main():
                         help="Don't create .flamquencyignore")
     
     # prune
-    p_prune = subparsers.add_parser("prune", help="Prune old snapshots (retention)")
+    p_prune = subparsers.add_parser("prune", help="Prune old snapshots (restic-style retention)")
     p_prune.add_argument("--keep-last", type=int, help="Keep last N snapshots")
     p_prune.add_argument("--older-than", type=int, metavar="DAYS",
-                         help="Delete snapshots older than DAYS")
-    p_prune.add_argument("--dry-run", action="store_true", help="Show what would be deleted")
+                         help="Keep snapshots newer than DAYS")
+    p_prune.add_argument("--keep-hourly", type=int, help="Keep last snapshot of each of last N hours")
+    p_prune.add_argument("--keep-daily", type=int, help="Keep last snapshot of each of last N days")
+    p_prune.add_argument("--keep-weekly", type=int, help="Keep last snapshot of each of last N weeks")
+    p_prune.add_argument("--keep-monthly", type=int, help="Keep last snapshot of each of last N months")
+    p_prune.add_argument("--keep-yearly", type=int, help="Keep last snapshot of each of last N years")
+    p_prune.add_argument("--keep-within", metavar="DUR",
+                         help="Keep snapshots newer than DUR (e.g. 1y6m2w4d)")
+    p_prune.add_argument("--dry-run", action="store_true", help="Preview without deleting")
     p_prune.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    # check
+    subparsers.add_parser("check", help="Verify blob store integrity")
+
+    # stats
+    subparsers.add_parser("stats", help="Storage statistics: dedup, size, encryption")
+
+    # update
+    p_update = subparsers.add_parser("update", help="Check and install updates")
+    p_update.add_argument("--check", action="store_true",
+                          help="Only check, don't install")
+    p_update.add_argument("--yes", "-y", action="store_true",
+                          help="Install without confirmation")
+    p_update.add_argument("--no-cache", action="store_true",
+                          help="Ignore cached check result")
+    p_update.add_argument("--dry-run", action="store_true",
+                          help="Show update command without running it")
     
     # watch
     p_watch = subparsers.add_parser("watch", help="Watch mode — auto-sync")
@@ -833,6 +1077,9 @@ def main():
         "snapshots": cmd_snapshots,
         "init": cmd_init,
         "prune": cmd_prune,
+        "check": cmd_check,
+        "stats": cmd_stats,
+        "update": cmd_update,
         "watch": cmd_watch,
         "config": cmd_config,
         "encryption": cmd_encryption,

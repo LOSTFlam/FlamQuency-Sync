@@ -470,7 +470,7 @@ class FlamQuencySync:
         if diff is None:
             return False, "Could not diff versions"
         return True, diff
-    
+
     def list_snapshots(self):
         snapshots = []
         if self.snapshot_dir.exists():
@@ -492,40 +492,123 @@ class FlamQuencySync:
                         })
         return snapshots
 
-    def prune_snapshots(self, keep_last=None, older_than_days=None):
-        """Retention policy: удалить старые снапшоты.
+    @staticmethod
+    def _parse_duration(text):
+        """Длительность в формате restic: «1y6m2w4d» → timedelta.
 
-        keep_last: оставить N последних снапшотов.
-        older_than_days: удалить снапшоты старше N дней.
-        Из конфига: retention.keep_last / retention.older_than_days.
+        Поддерживаются: y (год=365д), m (месяц=30д), w (неделя), d (сутки),
+        h, s. None если строка не разбирается.
+        """
+        import re
+        if not text:
+            return None
+        pattern = re.compile(
+            r"(?:(\d+)y)?(?:(\d+)m(?!o))?(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)s)?"
+        )
+        m = pattern.fullmatch(str(text).strip().lower())
+        if not m or not any(m.groups()):
+            return None
+        y, mo, w, d, h, s = (int(g or 0) for g in m.groups())
+        return timedelta(
+            days=y * 365 + mo * 30 + w * 7 + d,
+            hours=h,
+            seconds=s,
+        )
+
+    def prune_snapshots(self, keep_last=None, older_than_days=None,
+                        keep_hourly=None, keep_daily=None, keep_weekly=None,
+                        keep_monthly=None, keep_yearly=None, keep_within=None):
+        """Retention policy (restic-style): удалить старые снапшоты.
+
+        UNION-семантика restic: снапшот СОХРАНЯЕТСЯ, если его защищает
+        хотя бы одна активная политика; всё остальное удаляется.
+
+        Политики защиты:
+        - keep_last: N самых свежих снапшотов.
+        - older_than_days: всё, что новее N дней (от текущего момента).
+        - keep_hourly/daily/weekly/monthly/yearly: последний снапшот
+          в каждом из последних N часов/дней/недель/месяцев/лет.
+        - keep_within: «2w4d» / «1y6m» — всё новее длительности от
+          самого свежего снапшота (формат restic).
+
+        Из конфига: retention.* (любые из ключей выше).
         Возвращает (удалено, сообщение).
         """
         retention = (self.config.get("retention") or {})
-        if keep_last is None:
-            keep_last = retention.get("keep_last")
-        if older_than_days is None:
-            older_than_days = retention.get("older_than_days")
+        def _cfg(key, arg):
+            return arg if arg is not None else retention.get(key)
 
-        if keep_last is None and older_than_days is None:
+        keep_last = _cfg("keep_last", keep_last)
+        older_than_days = _cfg("older_than_days", older_than_days)
+        keep_hourly = _cfg("keep_hourly", keep_hourly)
+        keep_daily = _cfg("keep_daily", keep_daily)
+        keep_weekly = _cfg("keep_weekly", keep_weekly)
+        keep_monthly = _cfg("keep_monthly", keep_monthly)
+        keep_yearly = _cfg("keep_yearly", keep_yearly)
+        keep_within = _cfg("keep_within", keep_within)
+
+        if all(v is None for v in (keep_last, older_than_days, keep_hourly,
+                                   keep_daily, keep_weekly, keep_monthly,
+                                   keep_yearly, keep_within)):
             return 0, "Retention policy not configured"
 
         snapshots = self.list_snapshots()  # старые → новые
+        protected = set()
 
-        to_delete = set()
-        if keep_last is not None:
-            if len(snapshots) > keep_last:
-                for snap in snapshots[:-keep_last]:
-                    to_delete.add(snap["name"])
+        def _ts(snap):
+            try:
+                return datetime.fromisoformat(snap["timestamp"])
+            except (ValueError, TypeError):
+                return None
 
+        # keep_last: N самых свежих
+        if keep_last is not None and len(snapshots) > keep_last:
+            protected |= {s["name"] for s in snapshots[-keep_last:]}
+
+        # older_than_days: новее N дней от «сейчас»
         if older_than_days is not None:
             cutoff = datetime.now() - timedelta(days=older_than_days)
-            for snap in snapshots:
-                try:
-                    ts = datetime.fromisoformat(snap["timestamp"])
-                except (ValueError, TypeError):
+            for s in snapshots:
+                ts = _ts(s)
+                if ts is not None and ts >= cutoff:
+                    protected.add(s["name"])
+
+        # keep_within: новее длительности от самого свежего снапшота
+        if keep_within:
+            duration = self._parse_duration(keep_within)
+            if duration is not None and snapshots:
+                valid = [t for t in (_ts(s) for s in snapshots) if t is not None]
+                if valid:
+                    cutoff = max(valid) - duration
+                    for s in snapshots:
+                        ts = _ts(s)
+                        if ts is not None and ts >= cutoff:
+                            protected.add(s["name"])
+
+        # Периодические политики: в каждом из последних N периодов
+        # защищён только САМЫЙ СВЕЖИЙ снапшот (семантика restic).
+        for policy, keyfn in (
+            (keep_hourly, lambda ts: ts.strftime("%Y%m%d%H")),
+            (keep_daily, lambda ts: ts.strftime("%Y%m%d")),
+            (keep_weekly, lambda ts: ts.strftime("%G%V")),
+            (keep_monthly, lambda ts: ts.strftime("%Y%m")),
+            (keep_yearly, lambda ts: ts.strftime("%Y")),
+        ):
+            if policy is None:
+                continue
+            # группы периодов в порядке новые → старые; внутри группы
+            # снапшоты тоже новые → старые (groups[k][0] — самый свежий)
+            groups = {}
+            for s in reversed(snapshots):
+                ts = _ts(s)
+                if ts is None:
                     continue
-                if ts < cutoff:
-                    to_delete.add(snap["name"])
+                groups.setdefault(keyfn(ts), []).append(s["name"])
+            for group in list(groups.keys())[:policy]:
+                if groups[group]:
+                    protected.add(groups[group][0])
+
+        to_delete = {s["name"] for s in snapshots} - protected
 
         deleted = 0
         for name in sorted(to_delete):
@@ -539,6 +622,25 @@ class FlamQuencySync:
             return deleted, f"Pruned {deleted} snapshot(s)"
         return 0, "Nothing to prune"
     
+    def check_integrity(self):
+        """Проверка целостности хранилища (аналог restic check).
+
+        Проверяет:
+        - каждый блоб из индекса существует на диске;
+        - отсутствуют битые/пустые блобы.
+        Возвращает (ok, список проблем).
+        """
+        problems = []
+        blob_store = self.version_store.blob_store
+        index = getattr(blob_store, "_index", {})
+        for hash_hex in index:
+            blob_path = blob_store._blob_path(hash_hex)
+            if not blob_path.exists():
+                problems.append(f"missing blob: {hash_hex[:12]}")
+            elif blob_path.stat().st_size == 0:
+                problems.append(f"empty blob: {hash_hex[:12]}")
+        return (not problems), problems
+
     def status(self):
         backend_status = self.backend.get_status()
         vs_stats = self.version_store.stats()

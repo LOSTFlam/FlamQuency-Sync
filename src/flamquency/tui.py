@@ -22,7 +22,8 @@ class FlamQuencyTUI:
         console.clear()
     
     def draw_header(self):
-        title = Text("🔥 FlamQuency-Sync", style="bold cyan")
+        from flamquency.icons import icon as _icon
+        title = Text(f"{_icon('fire')} FlamQuency-Sync", style="bold cyan")
         version = Text(f"v{self.sync.config.get('__version__', '0.1.0')}", style="dim")
         header = Panel(title + " " + version, border_style="cyan")
         console.print(header)
@@ -227,7 +228,7 @@ class FlamQuencyTUI:
     def do_about(self):
         self.clear()
         self.draw_header()
-        console.print("[bold]🔥 FlamQuency-Sync[/bold]")
+        console.print(f"[bold]{_icon('fire')} FlamQuency-Sync[/bold]")
         console.print("Version 0.1.0")
         console.print("Terminal-based file synchronization with real versioning")
         console.print("\nFeatures:")
