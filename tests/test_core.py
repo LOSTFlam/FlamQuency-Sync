@@ -1204,6 +1204,102 @@ def test_prune_snapshots_older_than_days_protects():
     print("✓ prune_snapshots older_than_days protects recent snapshots")
 
 
+# ── Прогресс синхронизации ─────────────────────────────
+
+def test_sync_progress_reports_each_file():
+    """progress получает событие на каждый файл: done растёт до total."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(5):
+            (src / f"f{i}.txt").write_text(f"v{i}")
+
+        events = []
+        result = sync.sync(source=src, progress=events.append)
+
+        assert result.files_synced == 5
+        assert events, "progress-колбэк не вызвался ни разу"
+        # стартовое событие уже знает итоговый total
+        assert events[0].done == 0 and events[0].total == 5
+        assert events[0].current == ""
+        # done монотонно растёт 1..5, total неизменен
+        assert [e.done for e in events[1:]] == [1, 2, 3, 4, 5]
+        assert all(e.total == 5 for e in events)
+        # текущий файл — реальный путь из источника
+        assert any("f0.txt" in e.current for e in events)
+    print("✓ sync() сообщает прогресс по каждому файлу")
+
+
+def test_sync_progress_empty_source():
+    """Пустой источник: одно событие 0/0 — UI может закрыть прогресс."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        events = []
+        result = sync.sync(source=src, progress=events.append)
+        assert result.files_synced == 0
+        assert len(events) == 1
+        assert events[0].done == 0 and events[0].total == 0
+    print("✓ Пустой источник отдаёт одно событие 0/0")
+
+
+def test_sync_progress_spans_profile_roots():
+    """Профиль с двумя путями: один total на весь прогон."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from flamquency.profiles import create_profile, set_active
+        t = Path(tmpdir)
+        docs = t / "docs"; docs.mkdir()
+        (docs / "a.txt").write_text("A")
+        (docs / "b.txt").write_text("B")
+        code = t / "code"; code.mkdir()
+        (code / "c.txt").write_text("C")
+
+        config = dict(load_config())
+        config["use_ignore_file"] = False
+        create_profile(config, "multi", [str(docs), str(code)])
+        set_active(config, "multi")
+        base = t / "store"
+        sync = FlamQuencySync(config=config,
+                              backend=LocalBackend(base_path=base / "sync"),
+                              base_dir=base)
+
+        events = []
+        result = sync.sync(progress=events.append)
+        assert result.files_synced == 3
+        assert all(e.total == 3 for e in events)
+        # done не убывает и доходит до общего итога
+        assert [e.done for e in events] == [0, 1, 2, 3]
+        # файлы из ОБОИХ корней попали в события
+        currents = " ".join(e.current for e in events)
+        assert "docs" in currents and "code" in currents
+    print("✓ Прогресс профиля считается по всем путям сразу")
+
+
+def test_sync_progress_callback_failure_does_not_break_sync():
+    """Сломанный UI-колбэк никогда не роняет синхронизацию."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(3):
+            (src / f"f{i}.txt").write_text(str(i))
+
+        def boom(event):
+            raise RuntimeError("UI умер")
+
+        result = sync.sync(source=src, progress=boom)
+        assert result.files_synced == 3
+        assert not result.errors
+    print("✓ Падающий progress-колбэк не ломает синк")
+
+
+def test_sync_without_progress_still_works():
+    """Без колбэка синк работает как раньше (обратная совместимость)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        (src / "a.txt").write_text("A")
+        result = sync.sync(source=src)
+        assert result.files_synced == 1
+        assert result.paths or result.files_synced == 1
+    print("✓ sync() без progress работает как раньше")
+
+
 # ── TUI theme ───────────────────────────────────────────────
 
 def test_theme_registered():
@@ -1411,6 +1507,11 @@ def main():
         test_prune_snapshots_older_than_days,
         test_prune_snapshots_combined_policy,
         test_prune_snapshots_older_than_days_protects,
+        test_sync_progress_reports_each_file,
+        test_sync_progress_empty_source,
+        test_sync_progress_spans_profile_roots,
+        test_sync_progress_callback_failure_does_not_break_sync,
+        test_sync_without_progress_still_works,
         test_theme_registered,
         test_theme_applied_to_app,
         test_updater_version_comparison,

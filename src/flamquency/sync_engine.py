@@ -36,6 +36,33 @@ class SyncResult:
         self.profile = None    # profile name when this run followed one
         self.paths = []        # per-root breakdown: {"path", "label", "files_synced"}
 
+
+class SyncProgress:
+    """Одно событие прогресса синка.
+
+    done   — сколько файлов уже обработано (включая текущий)
+    total  — сколько файлов будет обработано за весь прогон
+    current — путь файла, который обрабатывается прямо сейчас
+             (пустая строка — событие «старт», total уже известен)
+    """
+
+    __slots__ = ("done", "total", "current")
+
+    def __init__(self, done, total, current=""):
+        self.done = done
+        self.total = total
+        self.current = current
+
+    @property
+    def fraction(self):
+        """Доля выполненного (0.0…1.0) — удобно для прогресс-баров."""
+        if not self.total:
+            return 1.0
+        return min(1.0, self.done / self.total)
+
+    def __repr__(self):
+        return f"SyncProgress(done={self.done}, total={self.total}, current={self.current!r})"
+
 class FlamQuencySync:
     """Main synchronization engine."""
 
@@ -260,11 +287,16 @@ class FlamQuencySync:
         return label
 
     def _sync_root(self, source, destination, label, max_files=10000,
-                   exclude_patterns=None):
+                   exclude_patterns=None, progress=None, done_offset=0,
+                   total=None):
         """Sync one root into `destination/label`, tracking versions as `label/rel`.
 
         Returns a SyncResult for this root alone; sync() aggregates the
         per-root results.
+
+        `progress` — optional callback(SyncProgress). When `total` is None
+        this call owns the whole run and emits the start event (0/total);
+        otherwise it only reports its own files on top of `done_offset`.
         """
         source = Path(source)
         destination = Path(destination)
@@ -273,10 +305,37 @@ class FlamQuencySync:
             source, exclude_patterns=exclude_patterns, max_files=max_files
         )
 
+        if total is None:
+            total = len(source_files)
+            self._emit_progress(progress, 0, total, "")
+
+        result = self._sync_files(source, destination, label, source_files,
+                                  excluded_count, progress=progress,
+                                  done_offset=done_offset, total=total)
+
+        # One snapshot per synced root — named after the root so rollbacks
+        # stay readable.
+        prefix = f"snapshot_{label}_" if label else "snapshot_"
+        snap_name = self._unique_snapshot_name(
+            f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        self.create_snapshot(name=snap_name, source_path=source,
+                             max_files=max_files,
+                             exclude_patterns=exclude_patterns)
+        result.snapshot_created = True
+        result.timestamp = datetime.now().isoformat()
+        return result
+
+    def _sync_files(self, source, destination, label, source_files,
+                    excluded_count, progress=None, done_offset=0, total=0):
+        """Скопировать уже отсканированный список файлов и записать версии."""
+        source = Path(source)
+        destination = Path(destination)
+
         result = SyncResult()
         result.files_excluded = excluded_count
 
-        for src_file in source_files:
+        for index, src_file in enumerate(source_files):
             rel = src_file.relative_to(source)
             # Label-prefixed keys keep version histories separate per root,
             # so two roots with an identically named file never collide.
@@ -299,27 +358,34 @@ class FlamQuencySync:
             except Exception as e:
                 result.errors.append(f"{src_file}: {e}")
 
-        # One snapshot per synced root — named after the root so rollbacks
-        # stay readable.
-        prefix = f"snapshot_{label}_" if label else "snapshot_"
-        snap_name = self._unique_snapshot_name(
-            f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        self.create_snapshot(name=snap_name, source_path=source,
-                             max_files=max_files,
-                             exclude_patterns=exclude_patterns)
-        result.snapshot_created = True
-        result.timestamp = datetime.now().isoformat()
+            # Прогресс считается по обработанным файлам (включая упавшие) —
+            # бар всегда доходит до 100%.
+            self._emit_progress(progress, done_offset + index + 1, total,
+                                str(src_file))
+
         return result
 
+    @staticmethod
+    def _emit_progress(progress, done, total, current=""):
+        """Отдать событие UI. Сломанный подписчик никогда не ломает синк."""
+        if progress is None:
+            return
+        try:
+            progress(SyncProgress(done, total, current))
+        except Exception:
+            pass
+
     def sync(self, source=None, destination=None, max_files=10000,
-             profile=None):
+             profile=None, progress=None):
         """Synchronize files.
 
         - explicit `source`  → single root, no profile (classic behaviour)
         - otherwise          → the profile named by `profile`, or the active
                                one from the config; every path of the profile
                                is synced in turn
+
+        `progress` — optional callback(SyncProgress) для UI: один start-event
+        (0/total на весь прогон) и по событию на каждый файл.
         """
         self._require_unlocked()
 
@@ -328,7 +394,7 @@ class FlamQuencySync:
             if destination is None:
                 destination = self.backend.base_path
             result = self._sync_root(source, destination, label=None,
-                                     max_files=max_files)
+                                     max_files=max_files, progress=progress)
             self._finish_sync(result)
             return result
 
@@ -349,9 +415,25 @@ class FlamQuencySync:
         excludes = profile_excludes(self.config, prof)
         roots = profile_paths(self.config, name)
 
+        # Предварительное сканирование всех корней — чтобы прогресс-бар
+        # знал общий итог до начала работы (один start-event на весь прогон).
+        root_files = {}
+        total_files = 0
+        for root in roots:
+            if not root.exists():
+                continue
+            files, _ = self._scan_with_stats(
+                root, exclude_patterns=excludes, max_files=max_files
+            )
+            root_files[root] = files
+            total_files += len(files)
+
+        self._emit_progress(progress, 0, total_files, "")
+
         combined = SyncResult()
         combined.profile = name
         taken_labels = set()
+        done_offset = 0
         for root in roots:
             if not root.exists():
                 combined.errors.append(f"{root}: path does not exist")
@@ -359,7 +441,11 @@ class FlamQuencySync:
             label = self._root_label(root, taken_labels)
             result = self._sync_root(root, destination, label,
                                      max_files=max_files,
-                                     exclude_patterns=excludes)
+                                     exclude_patterns=excludes,
+                                     progress=progress,
+                                     done_offset=done_offset,
+                                     total=total_files)
+            done_offset += result.files_synced
             combined.files_synced += result.files_synced
             combined.files_changed += result.files_changed
             combined.files_excluded += result.files_excluded
