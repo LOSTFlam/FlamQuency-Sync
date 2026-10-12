@@ -19,7 +19,18 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Sync profiles** — named sets of paths for different scenarios, switchable in one command
 - **Retention policy** — restic-style pruning: keep-last / hourly / daily / weekly / monthly / yearly / keep-within
 - **Integrity check** — `flamquency check` verifies the blob store (restic-check analogue)
-- **Storage stats** — `flamquency stats`: dedup ratio, saved space, encryption
+- **Storage stats** — `flamquency stats`: dedup ratio, saved space, encryption,
+  per-type bar chart, top-changed files, and `--graphs` for the storage
+  growth sparkline plus a snapshot timeline
+- **Backends** — `flamquency backend`: local, GitHub, S3 (AWS/MinIO/B2/Wasabi),
+  SMB/NFS shares, Google Drive and Dropbox via rclone; secrets stay in env vars
+- **Scheduling** — `flamquency schedule "каждый час"`: cron (Linux/macOS) or
+  Task Scheduler (Windows), smart autosync with a quiet period, post-sync hooks
+- **Evolution** — `flamquency evolve`: learns which files you edit most and
+  suggests profiles, priorities and shortcuts
+- **Content versioning** — `restore-content` / `view-content` / `restore-tree`:
+  read or restore any version anywhere, whole directories at once, and a
+  colour-coded `diff`
 - **Auto-update** — `flamquency update`: checks GitHub releases/git-tags, installs via pip or git
 - **Nerd Font icons** — no emoji; automatic ASCII fallback when the font is missing
 - **«Угольки» design system** — one palette for CLI and TUI, see docs/DESIGN.md
@@ -182,6 +193,31 @@ flamquency ignore --list              # show rules with their flags
 flamquency ignore --add "*.psd"       # append a pattern
 flamquency ignore --check design.psd  # which rule decides for this path?
 ```
+
+### Ignore by size and type
+
+Glob rules answer *which* files; sometimes you want *how big* or *what kind*.
+Global rules answer that, and they live in the config so they apply even with
+the ignore file disabled:
+
+```bash
+flamquency ignore --size-gt 1GB       # skip anything over a gigabyte
+flamquency ignore --size-lt 10KB      # skip specks smaller than metadata
+flamquency ignore --types mp4,avi     # skip video by extension
+flamquency ignore --clear-global      # drop all size/type rules
+```
+
+The same syntax works inside the ignore file itself:
+
+```gitignore
+size>1GB          # files larger than 1 GiB
+size<=10KB        # tiny files not worth versioning
+type=mp4,avi,mkv  # by extension, case-insensitive
+```
+
+Size rules apply **after** the file rules, so a `!important.mkv` still wins
+over `type=mkv`. `flamquency ignore --check` prints exactly which rule
+decided — including its size, when the file is on disk.
 
 `flamquency status` reports the active file and rule count. Disable the whole
 mechanism with `use_ignore_file: false` in the config, or point it elsewhere

@@ -22,7 +22,127 @@ IGNORE_FILENAME = ".flamquencyignore"
 
 # Bumped when the default template's *active* rules change so stale user
 # copies can be refreshed with --force.
-IGNORE_TEMPLATE_VERSION = 1
+IGNORE_TEMPLATE_VERSION = 2
+
+# ── Глобальные правила по размеру и типу (v2.0) ───────────────
+# Отдельный синтаксис, не пересекающийся с glob-строками файла:
+#
+#   size>1GB        — файлы больше 1 ГиБ
+#   size>=500MB     — от 500 МиБ включительно
+#   size<10KB       — мельче 10 КиБ
+#   type=mp4,avi    — по расширению (без точки, регистр не важен)
+#
+# Правила применяются ПОСЛЕ файловых: последнее совпадение решает, поэтому
+# файловое `!важное.mkv` всё ещё перебьёт `type=mkv`.
+
+_SIZE_UNITS = {
+    "B": 1, "K": 1024, "KB": 1024, "M": 1024 ** 2, "MB": 1024 ** 2,
+    "G": 1024 ** 3, "GB": 1024 ** 3, "T": 1024 ** 4, "TB": 1024 ** 4,
+    "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3, "TIB": 1024 ** 4,
+}
+
+_SIZE_RE = re.compile(
+    r"^size\s*(>=|<=|>|<|=)\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)$")
+_TYPE_RE = re.compile(r"^type\s*=\s*([A-Za-z0-9_,\s]+)$")
+
+
+def parse_size(text):
+    """«1GB» / «500 MB» / «1024» → байты (int). None если не разобрать."""
+    text = str(text).strip().upper().replace(" ", "")
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([A-Z]*)", text)
+    if not m:
+        return None
+    value, unit = m.groups()
+    factor = _SIZE_UNITS.get(unit, 1) if unit else 1
+    return int(float(value) * factor)
+
+
+class SizeRule:
+    """Правило по размеру файла: ``size>1GB``."""
+
+    kind = "size"
+
+    def __init__(self, operator, threshold_bytes):
+        self.operator = operator
+        self.threshold = int(threshold_bytes)
+
+    @classmethod
+    def parse(cls, text):
+        m = _SIZE_RE.match(str(text).strip())
+        if not m:
+            return None
+        operator, value, unit = m.groups()
+        # «1 GB» с пробелом внутри — уберём пробелы перед единицей
+        unit = unit.strip()
+        size = parse_size(f"{value}{unit}")
+        if size is None:
+            return None
+        return cls(operator, size)
+
+    def matches(self, rel_path, is_dir=False, size=None):
+        if is_dir or size is None:
+            return False
+        if self.operator == ">":
+            return size > self.threshold
+        if self.operator == ">=":
+            return size >= self.threshold
+        if self.operator == "<":
+            return size < self.threshold
+        if self.operator == "<=":
+            return size <= self.threshold
+        return size == self.threshold
+
+    def describe(self):
+        return f"размер {self.operator} {self.threshold} B"
+
+    @property
+    def raw(self):
+        """Строковая форма — для единообразного вывода в CLI."""
+        return f"size{self.operator}{self.threshold}"
+
+    def __repr__(self):
+        return f"SizeRule({self.raw})"
+
+
+class TypeRule:
+    """Правило по расширению: ``type=mp4,avi,mkv``."""
+
+    kind = "type"
+
+    def __init__(self, extensions):
+        self.extensions = {e.lower().lstrip(".") for e in extensions if e}
+
+    @classmethod
+    def parse(cls, text):
+        m = _TYPE_RE.match(str(text).strip())
+        if not m:
+            return None
+        raw = m.group(1).replace(",", " ").split()
+        if not raw:
+            return None
+        return cls(raw)
+
+    def matches(self, rel_path, is_dir=False, size=None):
+        if is_dir:
+            return False
+        suffix = Path(rel_path).suffix.lower().lstrip(".")
+        return bool(suffix) and suffix in self.extensions
+
+    def describe(self):
+        return "тип: " + ", ".join(sorted(self.extensions))
+
+    @property
+    def raw(self):
+        """Строковая форма — для единообразного вывода в CLI."""
+        return "type=" + ",".join(sorted(self.extensions))
+
+    def __repr__(self):
+        return f"TypeRule({self.raw})"
+
+
+def parse_global_rule(text):
+    """Строка → SizeRule / TypeRule, либо None если это не их синтаксис."""
+    return SizeRule.parse(text) or TypeRule.parse(text)
 
 
 class IgnoreRule:
@@ -143,21 +263,31 @@ class IgnoreRule:
 class IgnoreRules:
     """The full rule set loaded from an ignore file."""
 
-    def __init__(self, rules=None, path=None):
+    def __init__(self, rules=None, path=None, global_rules=None):
         self.rules = list(rules or [])
         self.path = Path(path) if path else None
+        # Глобальные правила (size/type) из конфига — не из файла.
+        self.global_rules = list(global_rules or [])
 
     # ── construction ───────────────────────────────────────────
 
     @classmethod
-    def from_lines(cls, lines, path=None):
+    def from_lines(cls, lines, path=None, global_rules=None):
         rules = []
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            # Глобальный синтаксис прямо в файле — тоже поддерживаем
+            parsed = parse_global_rule(stripped)
+            if parsed is not None:
+                if global_rules is None:
+                    rules.append(parsed)
+                else:
+                    global_rules.append(parsed)
+                continue
             rules.append(IgnoreRule(stripped))
-        return cls(rules, path=path)
+        return cls(rules, path=path, global_rules=global_rules or [])
 
     @classmethod
     def from_file(cls, path):
@@ -172,36 +302,70 @@ class IgnoreRules:
         return cls.from_lines(text.splitlines(), path=path)
 
     @classmethod
+    def from_config(cls, config, path=None):
+        """Файловые правила + глобальные size/type из конфига."""
+        rules = cls.from_file(path) if path else cls([])
+        rules.global_rules = _global_rules_from_config(config)
+        return rules
+
+    @classmethod
     def empty(cls):
         return cls([])
 
     # ── queries ────────────────────────────────────────────────
 
     def __len__(self):
-        return len(self.rules)
+        return len(self.rules) + len(self.global_rules)
 
     def __iter__(self):
-        return iter(self.rules)
+        return iter(list(self.rules) + list(self.global_rules))
 
     def __bool__(self):
-        return bool(self.rules)
+        return bool(self.rules) or bool(self.global_rules)
 
-    def match(self, rel_path, is_dir=False):
-        """Last matching rule wins; no match means the path is kept."""
+    def match(self, rel_path, is_dir=False, size=None):
+        """Last matching rule wins; no match means the path is kept.
+
+        `size` (bytes) активирует правила ``size>``/``size<``. Без него
+        глобальные size-правила просто не срабатывают — это нормально
+        для предварительной проверки по одному пути.
+
+        Оба списка правил (файловые и глобальные) просматриваются одним
+        проходом: правило из файла и правило из конфига равноправны, и
+        «последнее совпадение решает» работает между ними тоже.
+        """
         ignored = False
         for rule in self.rules:
-            if rule.matches(rel_path, is_dir=is_dir):
-                ignored = not rule.negate
+            ignored = self._apply(rule, rel_path, is_dir, size, ignored)
+        for rule in self.global_rules:
+            ignored = self._apply(rule, rel_path, is_dir, size, ignored)
         return ignored
 
-    def explain(self, rel_path, is_dir=False):
+    @staticmethod
+    def _apply(rule, rel_path, is_dir, size, current):
+        """Применить одно правило к текущему решению."""
+        try:
+            hit = rule.matches(rel_path, is_dir=is_dir, size=size)
+        except TypeError:
+            # У файлового IgnoreRule нет параметра size
+            hit = rule.matches(rel_path, is_dir=is_dir)
+        if not hit:
+            return current
+        return not getattr(rule, "negate", False)
+
+    def explain(self, rel_path, is_dir=False, size=None):
         """Like match() but also returns the deciding rule (or None)."""
         ignored = False
         decider = None
-        for rule in self.rules:
-            if rule.matches(rel_path, is_dir=is_dir):
-                ignored = not rule.negate
-                decider = rule
+        for rule in list(self.rules) + list(self.global_rules):
+            try:
+                hit = rule.matches(rel_path, is_dir=is_dir, size=size)
+            except TypeError:
+                hit = rule.matches(rel_path, is_dir=is_dir)
+            if not hit:
+                continue
+            ignored = not getattr(rule, "negate", False)
+            decider = rule
         return ignored, decider
 
     def match_path(self, path, base=None, is_dir=None):
@@ -270,6 +434,31 @@ def default_template():
 def default_ignore_path():
     """Where the user's ignore file lives: ~/.flamquencyignore."""
     return Path.home() / IGNORE_FILENAME
+
+
+def _global_rules_from_config(config):
+    """Глобальные size/type-правила из конфига (``ignore_size_gt`` и т.п.)."""
+    rules = []
+    if not config:
+        return rules
+    # Одиночные правила: ignore_size_gt / ignore_size_lt
+    for key, operator in (("ignore_size_gt", ">"), ("ignore_size_gte", ">="),
+                          ("ignore_size_lt", "<"), ("ignore_size_lte", "<=")):
+        value = config.get(key)
+        if value in (None, ""):
+            continue
+        size = parse_size(value)
+        if size is not None:
+            rules.append(SizeRule(operator, size))
+    # Список типов: ignore_types
+    types = config.get("ignore_types")
+    if types:
+        if isinstance(types, str):
+            types = types.replace(",", " ").split()
+        rule = TypeRule.parse("type=" + ",".join(str(t) for t in types))
+        if rule:
+            rules.append(rule)
+    return rules
 
 
 def write_default_ignore_file(path=None, force=False):

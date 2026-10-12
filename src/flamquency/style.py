@@ -210,6 +210,87 @@ def info_panel(console, content, title=None, icon_name="info"):
     )
 
 
+def bar_chart(rows, width=28, unit="B"):
+    """Горизонтальный bar-чарт «Угольки» из [(метка, значение), ...].
+
+    Шкала берётся от максимума, поэтому длинная полоса всегда читается.
+    Метка обрезается под ширину, значение подписывается справа.
+    """
+    if not rows:
+        return Text("(нет данных)", style="fq.faint")
+    values = [v for _, v in rows]
+    peak = max(values) or 1
+    label_width = max(len(str(label)) for label, _ in rows)
+    label_width = min(label_width, 18)
+
+    text = Text()
+    for label, value in rows:
+        filled = int(round(width * value / peak)) if value else 0
+        name = str(label)
+        if len(name) > label_width:
+            name = name[:label_width - 1] + "…"
+        text.append(f"{name:<{label_width}} ", style="fq.label")
+
+        # Градиент «угли → пламя»: чем длиннее полоса, тем горячее цвет
+        for i in range(width):
+            if i < filled:
+                ratio = i / max(1, width - 1)
+                color = _gradient_color(ratio)
+                text.append("█", style=color)
+            else:
+                text.append("░", style="fq.faint")
+        text.append(f" {human_size(value) if unit == 'B' else value}\n",
+                    style="fq.body")
+    return text
+
+
+def _gradient_color(ratio):
+    """Точка шкалы 0..1 → цвет от угольков к ядру пламени."""
+    stops = [(0.0, PALETTE["accent-ember"]),
+             (0.35, PALETTE["accent-deep"]),
+             (0.7, PALETTE["accent"]),
+             (1.0, PALETTE["accent-hot"])]
+    for i in range(len(stops) - 1):
+        lo, hi = stops[i][0], stops[i + 1][0]
+        if lo <= ratio <= hi:
+            return stops[i + 1][1] if (ratio - lo) > (hi - lo) / 2 else stops[i][1]
+    return PALETTE["accent-hot"]
+
+
+def sparkline(values, width=32, drop_outliers=True):
+    """Sparkline из блоков Unicode — тренд без осей.
+
+    ``drop_outliers`` отбрасывает единственный резкий выброс (например
+    первый снапшот с гигантским файлом) — иначе вся дальнейшая динамика
+    сплющивается в одну линию у пола.
+    """
+    if not values:
+        return Text("(нет данных)", style="fq.faint")
+    blocks = " ▁▂▃▄▅▆▇█"
+    if drop_outliers and len(values) >= 4:
+        ordered = sorted(values)
+        q1, q3 = ordered[len(ordered) // 4], ordered[3 * len(ordered) // 4]
+        iqr = q3 - q1
+        limit = q3 + 3 * iqr if iqr else q3
+        trimmed = [v for v in values if v <= limit] or values
+    else:
+        trimmed = values
+    peak = max(trimmed) or 1
+    floor = min(trimmed)
+    span = (peak - floor) or 1
+    # прореживаем до нужной ширины
+    if len(values) > width:
+        step = len(values) / width
+        values = [values[int(i * step)] for i in range(width)]
+    text = Text()
+    for v in values:
+        idx = int(round(8 * (v - floor) / span))
+        idx = max(0, min(8, idx))
+        color = _gradient_color(idx / 8)
+        text.append(blocks[idx], style=color)
+    return text
+
+
 def diff_text(diff):
     """Unified diff → Rich Text с подсветкой «Угольки».
 

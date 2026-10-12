@@ -566,3 +566,30 @@ class VersionStore:
             "tracked_files": file_count,
             **self.blob_store.stats(),
         }
+
+    def stats_by_type(self, limit=10):
+        """Статистика по типам файлов: [(расширение, файлов, байт), ...]."""
+        buckets = {}
+        for key in self.tracked_keys():
+            suffix = Path(key).suffix.lower().lstrip(".") or "(без расширения)"
+            info = buckets.setdefault(suffix, {"files": 0, "bytes": 0})
+            info["files"] += 1
+            history = self.get_history(key)
+            if history:
+                blob = self.blob_store._index.get(history[-1]["hash"], {})
+                info["bytes"] += int(blob.get("size", 0) or 0)
+        ranked = sorted(buckets.items(),
+                        key=lambda kv: (-kv[1]["bytes"], kv[0]))
+        return [(ext, v["files"], v["bytes"]) for ext, v in ranked[:limit]]
+
+    def top_changed_files(self, limit=10):
+        """Файлы с наибольшим числом версий — «топ изменяемых»."""
+        rows = []
+        for key in self.tracked_keys():
+            history = self.get_history(key)
+            if not history:
+                continue
+            blob = self.blob_store._index.get(history[-1]["hash"], {})
+            rows.append((key, len(history), int(blob.get("size", 0) or 0)))
+        rows.sort(key=lambda r: (-r[1], -r[2], r[0]))
+        return rows[:limit]

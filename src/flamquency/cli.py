@@ -1016,9 +1016,16 @@ def cmd_ignore(args):
 
     # ── --check: explain one path ──────────────────────────────
     if getattr(args, "check", None):
-        rules = IgnoreRules.from_file(path)
+        config = load_config()
+        rules = IgnoreRules.from_config(config, path)
         target = args.check
-        ignored, rule = rules.explain(target)
+        size = None
+        if Path(target).expanduser().is_file():
+            try:
+                size = Path(target).expanduser().stat().st_size
+            except OSError:
+                size = None
+        ignored, rule = rules.explain(target, size=size)
         if ignored:
             console.print(f"   [fq.warning]{icon('warning')}[/] ИГНОРИРУЕТСЯ: {target}")
             if rule is not None:
@@ -1031,16 +1038,29 @@ def cmd_ignore(args):
             console.print(f"   [fq.faint](правило не найдено — проверено {len(rules)} правил)[/]")
         return 0
 
+    # ── --size-gt / --size-lt / --types / --clear-global (v2.0) ──
+    if (getattr(args, "size_gt", None) or getattr(args, "size_lt", None)
+            or getattr(args, "types", None)
+            or getattr(args, "clear_global", False)):
+        return _apply_global_rules(console, args)
+
     # ── --list / default: show the rules ───────────────────────
-    rules = IgnoreRules.from_file(path)
-    if not path.exists():
+    rules = IgnoreRules.from_config(load_config(), path)
+    if not path.exists() and not rules.global_rules:
         console.print(f"   {icon('versions')} Ignore-файла ещё нет: {path}")
         console.print("   [fq.faint]Создать: flamquency ignore --init[/]")
         return 0
-    console.print(card(console, "\n".join(f"   {r}" for r in rules), title=f"{icon('versions')} {path} — {len(rules)} правил"))
+    console.print(card(console, "\n".join(f"   {r}" for r in rules),
+                       title=f"{icon('versions')} {path} — {len(rules)} правил"))
+    if rules.global_rules:
+        rows = [(f"{icon('filter')} {r.kind}", r.describe())
+                for r in rules.global_rules]
+        console.print(card(console, make_table(["Правило", "Условие"], rows),
+                           title=f"{icon('filter')} Глобальные правила из конфига"))
+        console.print("[fq.faint]Синтаксис файла: size>1GB · type=mp4,avi[/]")
     if not rules:
         return 0
-    for rule in rules:
+    for rule in rules.rules:
         flags = []
         if rule.negate:
             flags.append("negate")
@@ -1050,6 +1070,65 @@ def cmd_ignore(args):
             flags.append("anchored")
         tag = f"  [{', '.join(flags)}]" if flags else ""
         print(f"   {rule.raw}{tag}")
+    return 0
+
+
+def _apply_global_rules(console, args):
+    """Записать глобальные size/type-правила в конфиг (Task 6)."""
+    from flamquency.ignore import parse_size, _global_rules_from_config
+    config = load_config()
+    changed = []
+
+    if getattr(args, "size_gt", None):
+        if parse_size(args.size_gt) is None:
+            console.print(error_panel(
+                console, f"Не понимаю размер: {args.size_gt!r} (например 1GB)",
+                icon_name="error"))
+            return 1
+        config["ignore_size_gt"] = args.size_gt
+        changed.append(f"файлы больше {args.size_gt}")
+
+    if getattr(args, "size_lt", None):
+        if parse_size(args.size_lt) is None:
+            console.print(error_panel(
+                console, f"Не понимаю размер: {args.size_lt!r} (например 10KB)",
+                icon_name="error"))
+            return 1
+        config["ignore_size_lt"] = args.size_lt
+        changed.append(f"файлы меньше {args.size_lt}")
+
+    if getattr(args, "types", None):
+        types = [t.strip() for t in args.types.replace(",", " ").split() if t.strip()]
+        if not types:
+            console.print(error_panel(
+                console, "Не указан ни один тип", icon_name="error"))
+            return 1
+        existing = config.get("ignore_types") or []
+        if isinstance(existing, str):
+            existing = existing.replace(",", " ").split()
+        for t in types:
+            if t.lower().lstrip(".") not in [e.lower().lstrip(".") for e in existing]:
+                existing.append(t)
+        config["ignore_types"] = existing
+        changed.append(f"типы: {', '.join(types)}")
+
+    if getattr(args, "clear_global", False):
+        for key in ("ignore_size_gt", "ignore_size_lt", "ignore_types"):
+            config.pop(key, None)
+        console.print(success_panel(
+            console, "Глобальные правила сброшены",
+            title="Очищено", icon_name="success"))
+        save_config(config)
+        return 0
+
+    save_config(config)
+    active = _global_rules_from_config(config)
+    rows = [(r.kind, r.describe()) for r in active]
+    console.print(success_panel(
+        console, "Применено: " + "; ".join(changed),
+        title="Глобальные правила обновлены", icon_name="success"))
+    console.print(card(console, make_table(["Правило", "Условие"], rows),
+                       title=f"{icon('filter')} Активные правила"))
     return 0
 
 
@@ -1346,7 +1425,8 @@ def cmd_check(args):
 
 
 def cmd_stats(args):
-    """Статистика хранилища: дедупликация, размер, шифрование."""
+    """Статистика хранилища: дедупликация, размер, шифрование, графики."""
+    from flamquency.style import bar_chart, sparkline
     console = get_console()
     sync = get_sync_engine()
     stats = sync.version_store.stats()
@@ -1363,19 +1443,68 @@ def cmd_stats(args):
         saved_label = (f"[fq.warning]{human_size(saved)} "
                        f"({saved_pct:.1f}%)[/] [fq.faint]файлы мельче метаданных[/]")
 
+    console.print(banner(console, "Статистика хранилища",
+                         "дедупликация и использование места",
+                         icon_name="chart"))
+
+    dedup = sync.dedup_report()
     rows = [
         ("Блобов", f"[bold]{stats.get('blob_count', 0)}[/]"),
+        ("Версий всего", dedup["versions"]),
+        ("Дублей схлопнуто", f"[fq.success]{dedup['duplicate_versions']}[/]"),
         ("Исходный размер", human_size(stats.get("uncompressed_bytes", 0))),
         ("На диске", f"[bold]{human_size(stats.get('stored_bytes', 0))}[/]"),
         ("Сэкономлено", saved_label),
         ("Коэффициент", f"{stats.get('ratio', 0):.2f}x"),
         ("Зашифровано блобов", stats.get("encrypted_blobs", 0)),
     ]
-    console.print(banner(console, "Статистика хранилища",
-                         "дедупликация и использование места",
-                         icon_name="chart"))
     console.print(card(console, key_value(rows),
                        title=f"{icon('chart')} Blob store"))
+
+    by_type = sync.stats_by_type(limit=8)
+    if by_type:
+        console.print(card(
+            console,
+            bar_chart([(ext, size) for ext, _files, size in by_type]),
+            title=f"{icon('pie')} По типам файлов", icon_name="pie"))
+        console.print(card(
+            console, make_table(
+                ["Тип", "Файлов", "Размер"],
+                [(f"{icon('file')} {ext}", files, human_size(size))
+                 for ext, files, size in by_type]),
+            title="Детализация по типам"))
+
+    # Фокусные режимы: показываем только запрошенное и выходим
+    if args.by_type:
+        return 0
+
+    top_limit = args.top or 10
+    top = sync.top_changed_files(limit=top_limit)
+    if top:
+        console.print(card(
+            console, make_table(
+                ["Файл", "Версий", "Размер"],
+                [(path, count, human_size(size)) for path, count, size in top]),
+            title=f"{icon('history')} Топ изменяемых", icon_name="history"))
+    if args.top:
+        return 0
+
+    if args.graphs:
+        timeline = sync.storage_timeline()
+        if timeline:
+            console.print(card(
+                console, sparkline([size for _t, _f, size in timeline]),
+                title=f"{icon('graph')} Рост хранилища", icon_name="graph"))
+            console.print(card(
+                console, make_table(
+                    ["Снапшот", "Файлов", "Размер"],
+                    [(stamp, files, human_size(size))
+                     for stamp, files, size in timeline]),
+                title="Хронология снапшотов"))
+        else:
+            console.print(info_panel(
+                console, "Снапшотов пока нет — график появится после синков.",
+                title="Нечего рисовать", icon_name="info"))
     return 0
 
 
@@ -1596,7 +1725,15 @@ def main():
     subparsers.add_parser("check", help="Verify blob store integrity")
 
     # stats
-    subparsers.add_parser("stats", help="Storage statistics: dedup, size, encryption")
+    p_stats = subparsers.add_parser("stats", help="Storage statistics and charts")
+    p_stats.add_argument("--graphs", "-g", action="store_true",
+                         help="Show the storage growth sparkline and snapshot "
+                              "timeline")
+    p_stats.add_argument("--by-type", action="store_true",
+                         help="Only the per-file-type breakdown")
+    p_stats.add_argument("--top", type=int, metavar="N",
+                         help="Only the top N most-changed files")
+    p_stats.add_argument("--password", "-p", help="Blob store password")
 
     # update
     p_update = subparsers.add_parser("update", help="Check and install updates")
@@ -1637,6 +1774,15 @@ def main():
     p_ign.add_argument("--add", metavar="PATTERN", help="Append a pattern to the file")
     p_ign.add_argument("--check", metavar="PATH", help="Explain whether a path is ignored")
     p_ign.add_argument("--list", "-l", action="store_true", help="List the loaded rules")
+    # ── глобальные правила по размеру и типу (v2.0) ──
+    p_ign.add_argument("--size-gt", metavar="SIZE",
+                       help="Ignore files larger than SIZE (e.g. 1GB)")
+    p_ign.add_argument("--size-lt", metavar="SIZE",
+                       help="Ignore files smaller than SIZE (e.g. 10KB)")
+    p_ign.add_argument("--types", metavar="LIST",
+                       help="Ignore these extensions (e.g. mp4,avi,mkv)")
+    p_ign.add_argument("--clear-global", action="store_true",
+                       help="Drop all global size/type rules")
 
     # profile
     p_prof = subparsers.add_parser(

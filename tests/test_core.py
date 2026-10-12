@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from flamquency.sync_engine import FlamQuencySync, SyncResult, LocalBackend
-from flamquency.config import load_config, save_config
+from flamquency.config import load_config, save_config, DEFAULT_CONFIG
 from flamquency.version_store import VersionStore, BlobStore
 from flamquency.cloud import get_backend
 from flamquency.encryption import (
@@ -776,6 +776,196 @@ def test_config_carries_backend_settings():
                     assert value.startswith("FLAMQUENCY_"), value
         assert config["cloud_backend"] == "local"
     print("✓ конфиг описывает бэкенды, не храня секретов")
+
+
+def test_ignore_size_and_type_rules():
+    """Task 6: правила по размеру и типу — парсинг и матчинг."""
+    from flamquency.ignore import (
+        SizeRule, TypeRule, parse_size, parse_global_rule, IgnoreRules,
+    )
+
+    # размеры
+    assert parse_size("1GB") == 1024 ** 3
+    assert parse_size("500 MB") == 500 * 1024 ** 2
+    assert parse_size("10KB") == 10 * 1024
+    assert parse_size("1024") == 1024
+    assert parse_size("мусор") is None
+
+    gt = SizeRule.parse("size>1GB")
+    assert gt.operator == ">" and gt.threshold == 1024 ** 3
+    assert gt.matches("a.bin", size=1024 ** 3 + 1) is True
+    assert gt.matches("a.bin", size=1024 ** 3) is False
+    assert gt.matches("a.bin", is_dir=True, size=10 ** 9) is False
+    assert gt.matches("a.bin") is False          # без size правило молчит
+    assert gt.raw == f"size>{1024 ** 3}"
+
+    lt = SizeRule.parse("size<=10KB")
+    assert lt.matches("a.txt", size=10 * 1024) is True
+    assert lt.matches("a.txt", size=10 * 1024 + 1) is False
+
+    # типы
+    types = TypeRule.parse("type=mp4,avi,MKV")
+    assert types.extensions == {"mp4", "avi", "mkv"}
+    assert types.matches("dir/movie.MKV") is True      # регистр не важен
+    assert types.matches("movie.txt") is False
+    assert types.matches("movie", is_dir=True) is False
+    assert types.raw == "type=avi,mkv,mp4"
+
+    # не наш синтаксис → None
+    assert parse_global_rule("*.log") is None
+    assert parse_global_rule("size>abc") is None
+
+    # глобальный синтаксис прямо в файле тоже работает
+    rules = IgnoreRules.from_lines([
+        "*.md",              # файловое игнорирует .md
+        "!important.md",     # ...кроме важного
+        "size>1GB",
+        "type=mkv",
+    ])
+    assert rules.match("notes.md") is True
+    assert rules.match("important.md") is False
+    assert rules.match("big.bin", size=1024 ** 3 + 5) is True
+    assert rules.match("clip.mkv", size=10) is True
+    assert rules.match("clip.txt", size=10) is False
+    # 2 файловых + 2 глобальных, попавших в общий список
+    assert len(rules) == 4
+
+    # с явным списком глобальные правила попадают отдельно от файловых
+    split = IgnoreRules.from_lines(["size>1GB", "type=mkv", "*.log"],
+                                   global_rules=[])
+    assert len(split.rules) == 1 and len(split.global_rules) == 2
+    assert len(split) == 3
+    print("✓ правила по размеру и типу парсятся и матчатся")
+
+
+def test_global_rules_from_config():
+    """Task 6: конфиг → глобальные правила, applied при сканировании."""
+    from flamquency.ignore import _global_rules_from_config
+    from flamquency.sync_engine import FlamQuencySync
+    from flamquency.cloud import LocalBackend
+
+    rules = _global_rules_from_config({
+        "ignore_size_gt": "1MB",
+        "ignore_size_lt": "10KB",
+        "ignore_types": "mp4,avi",
+    })
+    assert [r.kind for r in rules] == ["size", "size", "type"]
+
+    # пустой/битый конфиг → никаких правил, но и никаких исключений
+    assert _global_rules_from_config({}) == []
+    assert _global_rules_from_config({"ignore_size_gt": "ерунда"}) == []
+    assert _global_rules_from_config(None) == []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        work = t / "work"
+        work.mkdir()
+        (work / "small.txt").write_text("мелкий")
+        (work / "big.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+        (work / "clip.mkv").write_bytes(b"\0" * 32)
+        (work / "keep.md").write_text("важное")
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["use_ignore_file"] = False
+        config["ignore_size_gt"] = "1MB"
+        config["ignore_types"] = "mkv"
+        base = t / "store"
+        sync = FlamQuencySync(
+            config=config,
+            backend=LocalBackend(base_path=base / "sync"),
+            base_dir=base,
+        )
+        # глобальные правила применяются даже с выключенным файловым ignore
+        assert len(sync.ignore_rules.global_rules) == 2
+
+        files = sync.scan_directory(work)
+        names = sorted(Path(f).name for f in files)
+        assert names == ["keep.md", "small.txt"], names
+
+        result = sync.sync(source=work)
+        assert result.files_excluded == 2
+        assert result.files_synced == 2
+    print("✓ глобальные правила исключают файлы при сканировании и синке")
+
+
+def test_stats_by_type_top_and_timeline():
+    """Task 7: статистика по типам, топ изменяемых, хронология."""
+    from flamquency.sync_engine import FlamQuencySync
+    from flamquency.cloud import LocalBackend
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        work = t / "work"
+        work.mkdir()
+        (work / "notes.md").write_text("раз")
+        (work / "data.json").write_text("{}")
+        (work / "movie.mkv").write_bytes(b"\0" * 512)
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["use_ignore_file"] = False
+        base = t / "store"
+        sync = FlamQuencySync(
+            config=config,
+            backend=LocalBackend(base_path=base / "sync"),
+            base_dir=base,
+        )
+        for i in range(4):
+            (work / "notes.md").write_text(f"правка {i}\n")
+            sync.sync(source=work)
+
+        # по типам: три расширения, отсортированы по убыванию размера
+        by_type = sync.stats_by_type()
+        assert [ext for ext, _f, _s in by_type] == ["mkv", "md", "json"]
+
+        # топ изменяемых: notes.md впереди — его правили 4 раза
+        top = sync.top_changed_files()
+        assert top[0][0] == "notes.md"
+        assert top[0][1] == 4
+        assert len(top) == 3
+
+        # хроника снапшотов: по строке на снапшот
+        timeline = sync.storage_timeline()
+        assert len(timeline) == len(sync.list_snapshots())
+        for stamp, files, size in timeline:
+            assert " " in stamp and files >= 1 and size >= 0
+
+        # дедуп-отчёт считает схлопнутые дубли
+        report = sync.dedup_report()
+        assert report["blobs"] == report["versions"]      # всё уникально
+        assert report["duplicate_versions"] == 0
+        assert report["raw_bytes"] >= report["stored_bytes"]
+    print("✓ статистика по типам, топ и хроника снапшотов работают")
+
+
+def test_bar_chart_and_sparkline():
+    """Task 7: CLI-графики — bar-чарт и sparkline."""
+    from flamquency.style import bar_chart, sparkline
+
+    # пустые данные не ломают отрисовку
+    assert bar_chart([]).plain == "(нет данных)"
+    assert sparkline([]).plain == "(нет данных)"
+
+    rows = [("bin", 3 * 1024 * 1024), ("mkv", 1024), ("md", 76)]
+    chart = bar_chart(rows)
+    assert "bin" in chart.plain and "3.0 MB" in chart.plain
+    assert "█" in chart.plain and "░" in chart.plain
+
+    # длинная метка обрезается
+    long_label = bar_chart([("очень-длинное-имя-файла.bin", 10)])
+    assert "…" in long_label.plain
+
+    # sparkline: тренд + выброс не сплющивает остальное
+    line = sparkline([100, 120, 140, 160, 180])
+    assert len(line.plain) == 5
+    assert set(line.plain) <= set(" ▁▂▃▄▅▆▇█")
+
+    outlier = sparkline([1, 1, 1, 1, 1000000])
+    assert len(outlier.plain) == 5        # индексы в пределах блоков
+    assert "█" in outlier.plain
+
+    # прореживание до ширины
+    assert len(sparkline(list(range(100)), width=32).plain) == 32
+    print("✓ bar-чарт и sparkline рисуют тренды без выхода за границы")
 
 
 def test_rollback_snapshot():
@@ -2095,6 +2285,10 @@ def main():
         test_rclone_backend_remote_naming,
         test_config_carries_backend_settings,
         test_backend_secret_env_can_be_disabled,
+        test_ignore_size_and_type_rules,
+        test_global_rules_from_config,
+        test_stats_by_type_top_and_timeline,
+        test_bar_chart_and_sparkline,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,

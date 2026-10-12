@@ -7,7 +7,9 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from flamquency.version_store import VersionStore, BlobStore
 from flamquency.cloud import LocalBackend
-from flamquency.ignore import IgnoreRules, default_ignore_path
+from flamquency.ignore import (
+    IgnoreRules, default_ignore_path, _global_rules_from_config,
+)
 from flamquency.encryption import (
     EncryptionManager, EncryptionError, WrongPasswordError,
     EncryptionLockedError, DecryptionError,
@@ -90,14 +92,22 @@ class FlamQuencySync:
         - explicit ignore_file (tests, future --ignore flag) always wins
         - otherwise ~/.flamquencyignore is used when use_ignore_file is on
         - a missing file is simply "no rules" — never an error
+
+        Глобальные правила по размеру и типу (``ignore_size_gt``,
+        ``ignore_types``) берутся из конфига всегда — даже когда файловый
+        ignore выключен: «не синкарить огромные файлы» — это политика
+        хранилища, а не вкусовая настройка файла.
         """
         if ignore_file is not None:
-            return IgnoreRules.from_file(Path(ignore_file).expanduser())
-        if not self.config.get("use_ignore_file", True):
-            return IgnoreRules.empty()
-        custom = self.config.get("ignore_file_path")
-        path = Path(custom).expanduser() if custom else default_ignore_path()
-        return IgnoreRules.from_file(path)
+            rules = IgnoreRules.from_file(Path(ignore_file).expanduser())
+        elif not self.config.get("use_ignore_file", True):
+            rules = IgnoreRules.empty()
+        else:
+            custom = self.config.get("ignore_file_path")
+            path = Path(custom).expanduser() if custom else default_ignore_path()
+            rules = IgnoreRules.from_file(path)
+        rules.global_rules = _global_rules_from_config(self.config)
+        return rules
 
     def _setup_encryption(self, password):
         """Build the encryption manager for the version store.
@@ -160,7 +170,14 @@ class FlamQuencySync:
             return True
         if self.ignore_rules:
             rel = self._rel_to(path, root)
-            ignored, decider = self.ignore_rules.explain(rel, is_dir=is_dir)
+            size = None
+            if not is_dir:
+                try:
+                    size = Path(path).stat().st_size
+                except OSError:
+                    size = None
+            ignored, decider = self.ignore_rules.explain(
+                rel, is_dir=is_dir, size=size)
             if decider is not None:
                 return ignored
         if patterns is None:
@@ -612,6 +629,61 @@ class FlamQuencySync:
         rel_str = self._find_rel_path(file_path)
         return self.version_store.view_file_content(
             rel_str, version_index=version_index, max_bytes=max_bytes)
+
+    # ── продвинутая статистика (v2.0, Task 7) ─────────────────
+
+    def snapshot_growth(self):
+        """[(метка, файлов, байт)] по снапшотам — данные для графика роста."""
+        rows = []
+        if not self.snapshot_dir.exists():
+            return rows
+        for manifest in sorted(self.snapshot_dir.glob("*/manifest.json")):
+            try:
+                meta = json.loads(manifest.read_text())
+            except Exception:
+                continue
+            entries = meta.get("manifest", {}) or {}
+            total = 0
+            for hash_hex in entries.values():
+                blob = self.version_store.blob_store._index.get(hash_hex, {})
+                total += int(blob.get("size", 0) or 0)
+            rows.append((meta.get("timestamp", "?"), len(entries), total))
+        return rows
+
+    def storage_timeline(self, limit=12):
+        """Накопительный ряд роста хранилища — для bar-чарта в CLI/TUI."""
+        rows = self.snapshot_growth()[-limit:]
+        series = []
+        for timestamp, files, size in rows:
+            series.append((timestamp[:16].replace("T", " "), files, size))
+        return series
+
+    def top_changed_files(self, limit=10):
+        """Файлы, которые менялись чаще всего (по числу версий)."""
+        return self.version_store.top_changed_files(limit=limit)
+
+    def stats_by_type(self, limit=10):
+        """Разбивка хранилища по типам файлов."""
+        return self.version_store.stats_by_type(limit=limit)
+
+    def dedup_report(self):
+        """Насколько дедупликация экономит место прямо сейчас."""
+        stats = self.version_store.stats()
+        blobs = stats.get("blob_count", 0)
+        versions = sum(len(h) for h in (
+            self.version_store.get_history(k)
+            for k in self.version_store.tracked_keys()))
+        stored = stats.get("stored_bytes", 0)
+        raw = stats.get("uncompressed_bytes", 0)
+        return {
+            "blobs": blobs,
+            "versions": versions,
+            "duplicate_versions": max(0, versions - blobs),
+            "stored_bytes": stored,
+            "raw_bytes": raw,
+            "saved_bytes": max(0, raw - stored),
+            "saved_pct": (100.0 * (raw - stored) / raw) if raw else 0.0,
+        }
 
     def restore_tree(self, prefix=None, dest_root=None, version_index=None,
                      progress=None):
