@@ -17,6 +17,8 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Encryption** — optional Fernet (AES-128) encryption of stored blobs with your password
 - **.flamquencyignore** — gitignore-style rules so you decide exactly what never gets synced
 - **Sync profiles** — named sets of paths for different scenarios, switchable in one command
+- **Retention policy** — auto-prune old snapshots by count or age
+- **«Угольки» design system** — consistent fire-themed TUI, see docs/DESIGN.md
 
 ## Installation
 
@@ -52,6 +54,13 @@ flamquency status
 
 # List snapshots
 flamquency snapshots
+
+# Quick setup (creates config, ignore file, retention policy)
+flamquency init --keep-last 10
+
+# Prune old snapshots (retention policy)
+flamquency prune --keep-last 5 --dry-run
+flamquency prune --older-than 30 --yes
 
 # Rollback to snapshot
 flamquency rollback --list

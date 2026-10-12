@@ -16,6 +16,7 @@ from flamquency.encryption import (
     EncryptionManager, EncryptionError, WrongPasswordError,
     EncryptionLockedError, DecryptionError,
 )
+from flamquency.ignore import default_ignore_path
 from flamquency.profiles import ProfileError
 
 ENV_PASSWORD = "FLAMQUENCY_PASSWORD"
@@ -625,6 +626,89 @@ def cmd_config(args):
     return 0
 
 
+def cmd_init(args):
+    """Quick setup: create config, ignore file, and (optionally) repo."""
+    config_dir = Path.home() / ".flamquency"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    config = load_config()
+
+    # 1. Ignore file
+    ignore_path = default_ignore_path()
+    if not ignore_path.exists() and not args.skip_ignore:
+        from flamquency.ignore import default_template
+        ignore_path.write_text(default_template())
+        print(f"✅ Created {ignore_path}")
+    elif ignore_path.exists():
+        print(f"ℹ️  Ignore file exists: {ignore_path}")
+
+    # 2. Retention defaults (если не заданы)
+    retention = config.get("retention")
+    if not retention:
+        config["retention"] = {"keep_last": args.keep_last}
+        save_config(config)
+        print(f"✅ Retention: keep last {args.keep_last} snapshots")
+
+    # 3. Опционально: git-репозиторий для снапшотов
+    if args.git:
+        snapshots_dir = config_dir / "snapshots"
+        if not (snapshots_dir / ".git").exists():
+            import subprocess
+            subprocess.run(["git", "init", "-q"], cwd=snapshots_dir, check=False)
+            print(f"✅ Git repo initialized in {snapshots_dir}")
+        else:
+            print(f"ℹ️  Git repo already exists in {snapshots_dir}")
+
+    print("\n🔥 FlamQuency-Sync initialized!")
+    print(f"   Config:  {config_dir / 'config.yaml'}")
+    print(f"   Ignore:  {ignore_path}")
+    print(f"   Snapshots: {config_dir / 'snapshots'}")
+    print("\nNext steps:")
+    print("   1. flamquency status          — проверить состояние")
+    print("   2. flamquency sync            — первый синк")
+    print("   3. flamquency-tui             — запустить TUI")
+    return 0
+
+
+def cmd_prune(args):
+    """Prune old snapshots (retention policy)."""
+    sync = get_sync_engine()
+
+    keep_last = args.keep_last
+    older_than = args.older_than
+
+    if keep_last is None and older_than is None:
+        retention = (sync.config.get("retention") or {})
+        keep_last = retention.get("keep_last")
+        older_than = retention.get("older_than_days")
+
+    if keep_last is None and older_than is None:
+        print("❌ No retention policy set. Use --keep-last N or --older-than DAYS")
+        print("   Or set retention in ~/.flamquency/config.yaml")
+        return 1
+
+    if args.dry_run:
+        snapshots = sync.list_snapshots()
+        total = len(snapshots)
+        print(f"📸 {total} snapshot(s) on disk")
+        if keep_last is not None:
+            excess = max(0, total - keep_last)
+            print(f"   Would prune {excess} (keeping last {keep_last})")
+        if older_than is not None:
+            print(f"   Would prune older than {older_than} days")
+        if not args.yes:
+            confirm = input("Continue? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled")
+                return 0
+        deleted, msg = sync.prune_snapshots(keep_last, older_than)
+    else:
+        deleted, msg = sync.prune_snapshots(keep_last, older_than)
+
+    print(f"🧹 {msg}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="flamquency",
@@ -662,6 +746,23 @@ def main():
     
     # snapshots
     subparsers.add_parser("snapshots", help="List snapshots")
+    
+    # init
+    p_init = subparsers.add_parser("init", help="Quick setup: config, ignore file, retention")
+    p_init.add_argument("--keep-last", type=int, default=10,
+                        help="Keep last N snapshots (default: 10)")
+    p_init.add_argument("--git", action="store_true",
+                        help="Init git repo in snapshots dir")
+    p_init.add_argument("--skip-ignore", action="store_true",
+                        help="Don't create .flamquencyignore")
+    
+    # prune
+    p_prune = subparsers.add_parser("prune", help="Prune old snapshots (retention)")
+    p_prune.add_argument("--keep-last", type=int, help="Keep last N snapshots")
+    p_prune.add_argument("--older-than", type=int, metavar="DAYS",
+                         help="Delete snapshots older than DAYS")
+    p_prune.add_argument("--dry-run", action="store_true", help="Show what would be deleted")
+    p_prune.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
     
     # watch
     p_watch = subparsers.add_parser("watch", help="Watch mode — auto-sync")
@@ -730,6 +831,8 @@ def main():
         "status": cmd_status,
         "diff": cmd_diff,
         "snapshots": cmd_snapshots,
+        "init": cmd_init,
+        "prune": cmd_prune,
         "watch": cmd_watch,
         "config": cmd_config,
         "encryption": cmd_encryption,

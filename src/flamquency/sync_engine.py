@@ -4,7 +4,7 @@ import sys
 import json
 import hashlib
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from flamquency.version_store import VersionStore, BlobStore
 from flamquency.cloud import LocalBackend
 from flamquency.ignore import IgnoreRules, default_ignore_path
@@ -491,6 +491,53 @@ class FlamQuencySync:
                             "file_count": 0,
                         })
         return snapshots
+
+    def prune_snapshots(self, keep_last=None, older_than_days=None):
+        """Retention policy: удалить старые снапшоты.
+
+        keep_last: оставить N последних снапшотов.
+        older_than_days: удалить снапшоты старше N дней.
+        Из конфига: retention.keep_last / retention.older_than_days.
+        Возвращает (удалено, сообщение).
+        """
+        retention = (self.config.get("retention") or {})
+        if keep_last is None:
+            keep_last = retention.get("keep_last")
+        if older_than_days is None:
+            older_than_days = retention.get("older_than_days")
+
+        if keep_last is None and older_than_days is None:
+            return 0, "Retention policy not configured"
+
+        snapshots = self.list_snapshots()  # старые → новые
+
+        to_delete = set()
+        if keep_last is not None:
+            if len(snapshots) > keep_last:
+                for snap in snapshots[:-keep_last]:
+                    to_delete.add(snap["name"])
+
+        if older_than_days is not None:
+            cutoff = datetime.now() - timedelta(days=older_than_days)
+            for snap in snapshots:
+                try:
+                    ts = datetime.fromisoformat(snap["timestamp"])
+                except (ValueError, TypeError):
+                    continue
+                if ts < cutoff:
+                    to_delete.add(snap["name"])
+
+        deleted = 0
+        for name in sorted(to_delete):
+            snap_path = self.snapshot_dir / name
+            if snap_path.exists():
+                import shutil
+                shutil.rmtree(snap_path)
+                deleted += 1
+
+        if deleted:
+            return deleted, f"Pruned {deleted} snapshot(s)"
+        return 0, "Nothing to prune"
     
     def status(self):
         backend_status = self.backend.get_status()

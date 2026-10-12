@@ -1,4 +1,8 @@
-"""Terminal User Interface for FlamQuency-Sync using Textual."""
+"""Terminal User Interface for FlamQuency-Sync using Textual.
+
+Visual language: «Угольки» design system — see docs/DESIGN.md.
+All colors/spacing come from the flamquency-fire theme (theme.py).
+"""
 import sys
 import json
 from pathlib import Path
@@ -6,236 +10,327 @@ from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.widgets import (
-    Header, Footer, Static, Button, Input, DataTable,
-    Label, Select, TabbedContent, TabPane, ProgressBar
+    Header, Footer, Static, Button, Input, DataTable, Label, ProgressBar
 )
 from textual.binding import Binding
 from textual.screen import Screen
 from textual import work
-from textual.worker import Worker
 
+from flamquency.theme import FLAMQUENCY_FIRE
+
+
+# ── Переиспользуемые компоненты (DESIGN.md §4) ──────────────────────
+
+class ResultPanel(Static):
+    """Панель результата: фон surface-raised, рамка accent (§4.5)."""
+    pass
+
+
+class ScreenTitle(Static):
+    """Заголовок экрана: bold, accent, с иконкой темы (§2)."""
+    pass
+
+
+class ScreenSubtitle(Static):
+    """Подзаголовок: muted (§2)."""
+    pass
+
+
+# ── Статус-бар (дашборд, §4.2) ──────────────────────────────────────
 
 class StatusBar(Static):
-    """Status bar showing sync info."""
+    """Прибитая к верху полоса с ключевыми метриками."""
     
     def __init__(self, sync_engine):
-        super().__init__()
+        super().__init__(classes="status-bar")
         self.sync = sync_engine
     
     def compose(self):
         status = self.sync.status()
-        last = status.get("last_sync", "Never")
+        last = status.get("last_sync")
         if last and last != "None":
             last = last[:19].replace("T", " ")
-
+        else:
+            last = "никогда"
+        
         storage_mb = status.get("storage_bytes", 0) / (1024 * 1024)
-
+        
         enc = status.get("encryption", "disabled")
         enc_icons = {"enabled": "🔒", "locked": "🔐", "disabled": "🔓"}
-
+        enc_colors = {"enabled": "success", "locked": "warning", "disabled": "warning"}
+        
+        profile = status.get("active_profile", "default")
+        
         yield Static(
-            f"  Backend: {status.get('backend', 'local')}  |  "
-            f"Tracked: {status.get('tracked_files', 0)} files  |  "
-            f"Storage: {storage_mb:.1f} MB  |  "
-            f"Enc: {enc_icons.get(enc, '🔓')} {enc}  |  "
-            f"Profile: {status.get('active_profile', 'default')} "
-            f"({status.get('profile_count', 1)})  |  "
-            f"Last sync: {last}",
+            f" [bold]Бэкенд:[/] {status.get('backend', 'local')}  "
+            f"[bold]Файлов:[/] {status.get('tracked_files', 0)}  "
+            f"[bold]Хранилище:[/] {storage_mb:.2f} MB  "
+            f"[{enc_colors.get(enc, 'warning')}]{enc_icons.get(enc, '🔓')}[/]  "
+            f"[bold]Профиль:[/] {profile}  "
+            f"[bold]Синк:[/] {last}",
             classes="status-text",
         )
     
     def refresh_status(self):
-        """Refresh the status display."""
         self.remove_children()
         for widget in self.compose():
             self.mount(widget)
 
 
-class SyncScreen(Screen):
-    """Sync screen with options and results."""
+# ── Боковая навигация (§4.1) ────────────────────────────────────────
+
+class NavRail(Vertical):
+    """Вертикальный rail с навигацией."""
     
-    BINDINGS = [
-        Binding("escape", "go_back", "Back"),
-    ]
+    def compose(self):
+        yield Static("🔥", classes="nav-logo")
+        yield Static("FlamQuency", classes="nav-title")
+        yield Static("", classes="spacer")
+        yield Button("🔄  Синк", variant="primary", id="nav-sync", classes="nav-btn")
+        yield Button("⏪  Откат", id="nav-rollback", classes="nav-btn")
+        yield Button("📁  Версии", id="nav-versions", classes="nav-btn")
+        yield Button("🔐  Шифр", id="nav-encryption", classes="nav-btn")
+        yield Button("⚙️  Настройки", id="nav-settings", classes="nav-btn")
+        yield Static("", classes="spacer")
+        yield Button("❌  Выход", variant="error", id="nav-exit", classes="nav-btn-exit")
+
+
+# ── Базовый экран: rail + контент ───────────────────────────────────
+
+class BaseScreen(Screen):
+    """Все экраны: статус-бар сверху, rail слева, контент справа (§5.1)."""
+    
+    BINDINGS = [Binding("escape", "go_dashboard", "Дашборд")]
     
     def __init__(self, sync_engine):
         super().__init__()
         self.sync = sync_engine
     
     def compose(self):
-        yield Container(
-            Static("🔥 Sync", classes="screen-title"),
-            Static("Select what to sync and start synchronization.", classes="screen-subtitle"),
-            Horizontal(
-                Button("Start Sync", variant="primary", id="btn-sync"),
-                Button("Back", variant="default", id="btn-back"),
-            ),
-            Static("", id="sync-result", classes="result-box"),
+        yield StatusBar(self.sync)
+        yield Horizontal(
+            NavRail(),
+            ScrollableContainer(*self.compose_content()),
         )
+    
+    def compose_content(self):
+        """Переопределяется наследниками — контент правой панели."""
+        return []
+    
+    def action_go_dashboard(self):
+        self.app.push_screen(DashboardScreen(self.sync))
+
+
+# ── Дашборд (§5.1) ──────────────────────────────────────────────────
+
+class DashboardScreen(BaseScreen):
+    """Главный экран."""
+    
+    def compose_content(self):
+        return [
+            Static("🔥 FlamQuency-Sync", classes="app-title"),
+            Static("Синхронизация файлов с контролем версий", classes="app-subtitle"),
+            Static("", classes="spacer"),
+            Static("Выбери действие в панели слева →", classes="app-hint"),
+        ]
+
+
+# ── Экран синка (§5.2) ──────────────────────────────────────────────
+
+class SyncScreen(BaseScreen):
+    """Синк: выбор источника, прогресс, результат."""
+    
+    def compose_content(self):
+        return [
+            ScreenTitle("🔥 Синхронизация", classes="screen-title"),
+            ScreenSubtitle("Запусти синхронизацию файлов и конфигов.", classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Static("Источник:", classes="field-label"),
+            Input(placeholder="~/.flamquency (по умолчанию)", id="source-input"),
+            Static("", classes="spacer"),
+            Button("▶  Синхронизировать", variant="primary", id="btn-sync"),
+            Static("", classes="spacer"),
+            ProgressBar(total=100, show_eta=False, id="sync-progress"),
+            ResultPanel("", id="sync-result", classes="result-box"),
+        ]
     
     def on_button_pressed(self, event):
         if event.button.id == "btn-sync":
             self.run_sync()
-        elif event.button.id == "btn-back":
-            self.app.pop_screen()
     
     @work(thread=True)
     def run_sync(self):
-        """Run sync in background thread."""
-        self.query_one("#sync-result", Static).update("⏳ Syncing...")
+        result_widget = self.query_one("#sync-result", ResultPanel)
+        progress = self.query_one("#sync-progress", ProgressBar)
         
-        result = self.sync.sync()
+        result_widget.update("⏳ Синхронизация...")
+        self.app.call_from_thread(progress.update, progress=10)
+        
+        source_input = self.query_one("#source-input", Input)
+        source_val = source_input.value.strip()
+        source = Path(source_val).expanduser() if source_val else None
+        
+        result = self.sync.sync(source=source)
+        
+        self.app.call_from_thread(progress.update, progress=100)
         
         output = (
-            f"✅ Sync complete!\n\n"
-            f"  Files synced:    {result.files_synced}\n"
-            f"  Files changed:   {result.files_changed}\n"
-            f"  Files excluded:  {result.files_excluded}\n"
-            f"  Blobs stored:    {result.blobs_stored}\n"
-            f"  Errors:          {len(result.errors)}\n"
+            f"[bold success]✅ Синхронизация завершена![/]\n\n"
+            f"  Файлов синхронизировано:  [bold]{result.files_synced}[/]\n"
+            f"  Изменено:                 [bold]{result.files_changed}[/]\n"
+            f"  Исключено:                {result.files_excluded}\n"
+            f"  Блобов сохранено:         [bold]{result.blobs_stored}[/]\n"
+            f"  Ошибок:                   {len(result.errors)}\n"
         )
         
         if result.errors:
-            output += "\n⚠️ Errors:\n"
+            output += "\n[warning]⚠️ Ошибки:[/]\n"
             for e in result.errors[:5]:
-                output += f"  {e}\n"
+                output += f"  [error]{e}[/]\n"
         
-        self.query_one("#sync-result", Static).update(output)
-    
-    def action_go_back(self):
-        self.app.pop_screen()
+        result_widget.update(output)
+        
+        # Обновить статус-бар
+        try:
+            status_bar = self.app.query_one(StatusBar)
+            self.app.call_from_thread(status_bar.refresh_status)
+        except Exception:
+            pass
 
 
-class RollbackScreen(Screen):
-    """Rollback screen - snapshot and file rollback."""
-    
-    BINDINGS = [
-        Binding("escape", "go_back", "Back"),
-    ]
+# ── Экран откатa (§5.3) ─────────────────────────────────────────────
+
+class RollbackScreen(BaseScreen):
+    """Откат: таблица снапшотов."""
     
     def __init__(self, sync_engine):
-        super().__init__()
-        self.sync = sync_engine
+        super().__init__(sync_engine)
     
-    def compose(self):
-        yield Container(
-            Static("⏪ Rollback", classes="screen-title"),
-            Static("Restore from snapshots or file versions.", classes="screen-subtitle"),
-        )
-        yield ScrollableContainer(id="snapshot-list")
-        yield Container(
+    def compose_content(self):
+        return [
+            ScreenTitle("⏪ Откат", classes="screen-title"),
+            ScreenSubtitle("Восстанови систему до снапшота.", classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            DataTable(id="snapshots-table", cursor_type="row"),
+            Static("", classes="spacer"),
             Horizontal(
-                Button("Refresh", id="btn-refresh"),
-                Button("Back", variant="default", id="btn-back"),
+                Button("↻  Обновить", id="btn-refresh"),
+                Button("⏪  Откатить", variant="primary", id="btn-rollback"),
             ),
-            Static("", id="rollback-result", classes="result-box"),
-        )
+            ResultPanel("", id="rollback-result", classes="result-box"),
+        ]
     
     def on_mount(self):
+        table = self.query_one("#snapshots-table", DataTable)
+        table.add_columns("Время", "Файлов")
         self.load_snapshots()
     
     def load_snapshots(self):
-        """Load and display available snapshots."""
-        container = self.query_one("#snapshot-list", ScrollableContainer)
-        container.remove_children()
+        table = self.query_one("#snapshots-table", DataTable)
+        table.clear()
         
         snapshots = self.sync.list_snapshots()
         
         if not snapshots:
-            container.mount(Static("No snapshots available. Run a sync first.", classes="empty-msg"))
+            table.add_row("— нет снапшотов —", "")
             return
         
-        for i, snap in enumerate(reversed(snapshots)):
+        for snap in reversed(snapshots):
             ts = snap["timestamp"][:19].replace("T", " ")
-            btn = Button(
-                f"📸 {ts}  ({snap['file_count']} files)",
-                id=f"snap-{len(snapshots)-1-i}",
-                classes="snapshot-btn",
-            )
-            container.mount(btn)
+            table.add_row(ts, str(snap["file_count"]), key=snap["name"])
     
     def on_button_pressed(self, event):
-        btn_id = event.button.id or ""
-        
-        if btn_id == "btn-back":
-            self.app.pop_screen()
-        elif btn_id == "btn-refresh":
+        if event.button.id == "btn-refresh":
             self.load_snapshots()
-        elif btn_id.startswith("snap-"):
-            idx = int(btn_id.replace("snap-", ""))
-            snapshots = self.sync.list_snapshots()
-            if 0 <= idx < len(snapshots):
-                self.rollback_snapshot(snapshots[idx])
+        elif event.button.id == "btn-rollback":
+            self.rollback_selected()
     
-    @work(thread=True)
-    def rollback_snapshot(self, snapshot):
-        """Rollback to snapshot in background."""
-        self.query_one("#rollback-result", Static).update(f"⏳ Rolling back to {snapshot['name']}...")
+    def rollback_selected(self):
+        table = self.query_one("#snapshots-table", DataTable)
+        result_widget = self.query_one("#rollback-result", ResultPanel)
         
-        success, msg = self.sync.rollback_to_snapshot(snapshot["name"])
-        
-        icon = "✅" if success else "❌"
-        self.query_one("#rollback-result", Static).update(f"{icon} {msg}")
-    
-    def action_go_back(self):
-        self.app.pop_screen()
-
-
-class FileVersionsScreen(Screen):
-    """File version history and per-file rollback."""
-    
-    BINDINGS = [
-        Binding("escape", "go_back", "Back"),
-    ]
-    
-    def __init__(self, sync_engine):
-        super().__init__()
-        self.sync = sync_engine
-    
-    def compose(self):
-        yield Container(
-            Static("📁 File Versions", classes="screen-title"),
-            Static("View and restore individual file versions.", classes="screen-subtitle"),
-            Input(placeholder="Enter file path (e.g. ~/.config/hypr/hyprland.conf)", id="file-input"),
-            Button("Load Versions", variant="primary", id="btn-load"),
-            Static("", id="versions-result", classes="result-box"),
-        )
-        yield Container(
-            Horizontal(
-                Button("Back", variant="default", id="btn-back"),
-            ),
-        )
-    
-    def on_mount(self):
-        self.load_versions()
-    
-    def load_versions(self):
-        """Load version history for entered file."""
-        file_input = self.query_one("#file-input", Input)
-        filepath = file_input.value.strip()
-        
-        if not filepath:
-            self.query_one("#versions-result", Static).update("⚠️ Enter a file path first")
+        if table.row_count == 0:
+            result_widget.update("[warning]⚠️ Нет снапшотов для откатa[/]")
             return
         
-        # Expand path
-        if filepath.startswith("~"):
-            filepath = str(Path(filepath).expanduser())
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        snap_name = str(row_key.value)
+        
+        result_widget.update(f"⏳ Откат к {snap_name}...")
+        self._do_rollback(snap_name)
+    
+    @work(thread=True)
+    def _do_rollback(self, snap_name):
+        success, msg = self.sync.rollback_to_snapshot(snap_name)
+        result_widget = self.query_one("#rollback-result", ResultPanel)
+        
+        if success:
+            result_widget.update(f"[bold success]✅ {msg}[/]")
+        else:
+            result_widget.update(f"[bold error]❌ {msg}[/]")
+        
+        self.app.call_from_thread(self.load_snapshots)
+
+
+# ── Экран версий файла (§5.4) ───────────────────────────────────────
+
+class FileVersionsScreen(BaseScreen):
+    """Версии файла: история и пофайловый откат."""
+    
+    def compose_content(self):
+        return [
+            ScreenTitle("📁 Версии файлов", classes="screen-title"),
+            ScreenSubtitle("Посмотри историю файла и откати к любой версии.", classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Static("Путь к файлу:", classes="field-label"),
+            Input(placeholder="~/.config/hypr/hyprland.conf", id="file-input"),
+            Static("", classes="spacer"),
+            Button("🔍  Загрузить версии", variant="primary", id="btn-load"),
+            Static("", classes="spacer"),
+            DataTable(id="versions-table", cursor_type="row"),
+            Static("", classes="spacer"),
+            Button("⏪  Откатить выбранную", variant="primary", id="btn-restore"),
+            ResultPanel("", id="versions-result", classes="result-box"),
+        ]
+    
+    def on_mount(self):
+        table = self.query_one("#versions-table", DataTable)
+        table.add_columns("#", "Хеш", "Время", "Размер")
+    
+    def on_button_pressed(self, event):
+        if event.button.id == "btn-load":
+            self.load_versions()
+        elif event.button.id == "btn-restore":
+            self.restore_selected()
+    
+    def _get_filepath(self):
+        file_input = self.query_one("#file-input", Input)
+        filepath = file_input.value.strip()
+        if not filepath:
+            return None
+        return str(Path(filepath).expanduser())
+    
+    def load_versions(self):
+        filepath = self._get_filepath()
+        result_widget = self.query_one("#versions-result", ResultPanel)
+        table = self.query_one("#versions-table", DataTable)
+        table.clear()
+        
+        if not filepath:
+            result_widget.update("[warning]⚠️ Сначала введи путь к файлу[/]")
+            return
         
         success, info = self.sync.rollback_file(filepath)
         
-        result_widget = self.query_one("#versions-result", Static)
-        
         if not success:
-            result_widget.update(f"❌ {info}")
+            result_widget.update(f"[error]❌ {info}[/]")
             return
         
         if isinstance(info, dict):
-            output = f"📄 {info['rel_path']}\n"
-            output += f"   {info['version_count']} version(s)\n\n"
-            
-            table = DataTable()
-            table.add_columns("#", "Hash", "Timestamp", "Size")
+            result_widget.update(
+                f"📄 [bold]{info['rel_path']}[/] — "
+                f"{info['version_count']} версия(й)"
+            )
             for v in info["versions"]:
                 table.add_row(
                     str(v["index"]),
@@ -243,155 +338,188 @@ class FileVersionsScreen(Screen):
                     v["timestamp"][:19].replace("T", " "),
                     str(v["size"]),
                 )
-            
-            result_widget.update(output)
-            
-            # Show table
-            container = self.query_one("#versions-table-container", Container) if self.query("#versions-table-container") else None
-            if container:
-                container.remove_children()
-                container.mount(table)
-            else:
-                new_container = Container(table, id="versions-table-container")
-                self.mount(new_container)
-            
-            # Add rollback buttons
-            restore_container = self.query_one("#restore-container") if self.query("#restore-container") else None
-            if not restore_container:
-                restore_container = Container(id="restore-container")
-                self.mount(restore_container)
-            restore_container.remove_children()
-            
-            for v in info["versions"]:
-                btn = Button(
-                    f"⏪ Restore v{v['index']} ({v['timestamp'][:10]})",
-                    id=f"restore-{v['index']}",
-                    classes="restore-btn",
-                )
-                restore_container.mount(btn)
+    
+    def restore_selected(self):
+        filepath = self._get_filepath()
+        result_widget = self.query_one("#versions-result", ResultPanel)
+        table = self.query_one("#versions-table", DataTable)
+        
+        if not filepath:
+            result_widget.update("[warning]⚠️ Сначала введи путь к файлу[/]")
+            return
+        
+        if table.row_count == 0:
+            result_widget.update("[warning]⚠️ Сначала загрузи версии[/]")
+            return
+        
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        try:
+            idx = int(str(row_key.value))
+        except (ValueError, TypeError):
+            result_widget.update("[error]❌ Не удалось определить версию[/]")
+            return
+        
+        success, msg = self.sync.rollback_file(filepath, version_index=idx)
+        
+        if success:
+            result_widget.update(f"[bold success]✅ {msg}[/]")
+            self.load_versions()
+        else:
+            result_widget.update(f"[bold error]❌ {msg}[/]")
+
+
+# ── Экран шифрования (§5.5) ─────────────────────────────────────────
+
+class EncryptionScreen(BaseScreen):
+    """Шифрование: статус, управление."""
+    
+    def compose_content(self):
+        return [
+            ScreenTitle("🔐 Шифрование", classes="screen-title"),
+            ScreenSubtitle("Fernet/AES шифрование блобов с паролем.", classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Static("Статус:", classes="field-label"),
+            Static("", id="enc-status"),
+            Static("", classes="spacer"),
+            Static("Пароль:", classes="field-label"),
+            Input(placeholder="Введи пароль для шифрования", password=True, id="enc-password"),
+            Static("", classes="spacer"),
+            Horizontal(
+                Button("🔒  Включить", variant="primary", id="btn-enc-on"),
+                Button("🔓  Выключить", variant="default", id="btn-enc-off"),
+            ),
+            ResultPanel("", id="enc-result", classes="result-box"),
+        ]
+    
+    def on_mount(self):
+        self.update_status()
+    
+    def update_status(self):
+        status = self.sync.status()
+        enc = status.get("encryption", "disabled")
+        widget = self.query_one("#enc-status", Static)
+        
+        if enc == "enabled":
+            widget.update("[bold success]🔒 Шифрование включено[/]")
+        elif enc == "locked":
+            widget.update("[bold warning]🔐 Заблокировано — нужен пароль[/]")
+        else:
+            widget.update("[dim]🔓 Шифрование выключено[/]")
     
     def on_button_pressed(self, event):
-        btn_id = event.button.id or ""
-        if btn_id.startswith("restore-"):
-            idx = int(btn_id.replace("restore-", ""))
-            file_input = self.query_one("#file-input", Input)
-            filepath = file_input.value.strip()
-            if filepath.startswith("~"):
-                filepath = str(Path(filepath).expanduser())
-            
-            success, msg = self.sync.rollback_file(filepath, version_index=idx)
-            icon = "✅" if success else "❌"
-            self.query_one("#versions-result", Static).update(f"{icon} {msg}")
+        if event.button.id == "btn-enc-on":
+            self.enable_encryption()
+        elif event.button.id == "btn-enc-off":
+            self.disable_encryption()
     
-    def action_go_back(self):
-        self.app.pop_screen()
+    def enable_encryption(self):
+        password = self.query_one("#enc-password", Input).value
+        result_widget = self.query_one("#enc-result", ResultPanel)
+        
+        if not password:
+            result_widget.update("[warning]⚠️ Введи пароль[/]")
+            return
+        
+        success, msg = self.sync.enable_encryption(password)
+        if success:
+            result_widget.update(f"[bold success]✅ {msg}[/]")
+        else:
+            result_widget.update(f"[bold error]❌ {msg}[/]")
+        self.update_status()
+    
+    def disable_encryption(self):
+        result_widget = self.query_one("#enc-result", ResultPanel)
+        success, msg = self.sync.disable_encryption()
+        if success:
+            result_widget.update(f"[bold success]✅ {msg}[/]")
+        else:
+            result_widget.update(f"[bold error]❌ {msg}[/]")
+        self.update_status()
 
 
-class SettingsScreen(Screen):
-    """Settings and configuration screen."""
+# ── Экран настроек (§5.6) ───────────────────────────────────────────
+
+class SettingsScreen(BaseScreen):
+    """Настройки: только чтение + ссылки на CLI."""
     
-    BINDINGS = [
-        Binding("escape", "go_back", "Back"),
-    ]
-    
-    def __init__(self, sync_engine):
-        super().__init__()
-        self.sync = sync_engine
-    
-    def compose(self):
+    def compose_content(self):
         config = self.sync.config
         
-        yield Container(
-            Static("⚙️ Settings", classes="screen-title"),
-            ScrollableContainer(
-                Static("[bold]Cloud Backend[/bold]"),
-                Static(f"Current: {config.get('cloud_backend', 'local')}"),
-                Static(""),
-                Static("[bold]Exclusion Patterns[/bold]"),
-                *[Static(f"  • {p}") for p in config.get("exclude_patterns", [])[:15]],
-                Static(""),
-                Static("[bold]Auto Sync[/bold]"),
-                Static(f"Enabled: {config.get('auto_sync', False)}"),
-                Static(f"Interval: {config.get('sync_interval_hours', 24)}h"),
-                Static(""),
-                Static("[bold].flamquencyignore[/bold]"),
-                Static(f"File: {self.sync.ignore_rules.path or '~/.flamquencyignore (not created yet)'}"),
-                Static(f"Rules: {len(self.sync.ignore_rules)}"),
-                Static("[dim]Manage with: flamquency ignore --init|--list|--add|--check[/dim]"),
-                Static(""),
-                Static("[bold]Encryption[/bold]"),
-                Static(f"Enabled: {(config.get('encryption') or {}).get('enabled', False)}"),
-                Static("[dim]Manage with: flamquency encryption status|enable|disable[/dim]"),
-                Static(""),
-                Static("[dim]Edit ~/.flamquency/config.yaml for advanced settings[/dim]"),
-            ),
-            Horizontal(
-                Button("Back", variant="default", id="btn-back"),
-            ),
-        )
-    
-    def on_button_pressed(self, event):
-        if event.button.id == "btn-back":
-            self.app.pop_screen()
-    
-    def action_go_back(self):
-        self.app.pop_screen()
-
-
-class MainScreen(Screen):
-    """Main menu screen."""
-    
-    def __init__(self, sync_engine):
-        super().__init__()
-        self.sync = sync_engine
-    
-    def compose(self):
-        yield Header()
-        yield StatusBar(self.sync)
-        yield Container(
-            Static("🔥 FlamQuency-Sync", classes="app-title"),
-            Static("File synchronization with version control", classes="app-subtitle"),
+        return [
+            ScreenTitle("⚙️ Настройки", classes="screen-title"),
+            ScreenSubtitle("Конфигурация FlamQuency-Sync.", classes="screen-subtitle"),
+            Static("", classes="spacer"),
+            Static("[bold]Облачный бэкенд[/]", classes="settings-section"),
+            Static(f"  Текущий: {config.get('cloud_backend', 'local')}", classes="settings-value"),
             Static(""),
-            Button("🔄  Sync Now", variant="primary", id="btn-sync", classes="menu-btn"),
-            Button("⏪  Rollback", variant="default", id="btn-rollback", classes="menu-btn"),
-            Button("📁  File Versions", variant="default", id="btn-versions", classes="menu-btn"),
-            Button("⚙️  Settings", variant="default", id="btn-settings", classes="menu-btn"),
-            Button("❌  Exit", variant="error", id="btn-exit", classes="menu-btn"),
-        )
-        yield Footer()
-    
-    def on_button_pressed(self, event):
-        btn_id = event.button.id or ""
-        
-        if btn_id == "btn-sync":
-            self.app.push_screen(SyncScreen(self.sync))
-        elif btn_id == "btn-rollback":
-            self.app.push_screen(RollbackScreen(self.sync))
-        elif btn_id == "btn-versions":
-            self.app.push_screen(FileVersionsScreen(self.sync))
-        elif btn_id == "btn-settings":
-            self.app.push_screen(SettingsScreen(self.sync))
-        elif btn_id == "btn-exit":
-            self.app.exit()
+            Static("[bold]Исключения[/]", classes="settings-section"),
+            *[Static(f"  • {p}", classes="settings-value") for p in config.get("exclude_patterns", [])[:15]],
+            Static(""),
+            Static("[bold]Автосинк[/]", classes="settings-section"),
+            Static(f"  Включён: {config.get('auto_sync', False)}", classes="settings-value"),
+            Static(f"  Интервал: {config.get('sync_interval_hours', 24)}ч", classes="settings-value"),
+            Static(""),
+            Static("[bold].flamquencyignore[/]", classes="settings-section"),
+            Static(f"  Файл: {self.sync.ignore_rules.path or '~/.flamquencyignore (не создан)'}", classes="settings-value"),
+            Static(f"  Правил: {len(self.sync.ignore_rules)}", classes="settings-value"),
+            Static("[dim]  Управление: flamquency ignore --init|--list|--add|--check[/]"),
+            Static(""),
+            Static("[bold]Шифрование[/]", classes="settings-section"),
+            Static(f"  Включено: {(config.get('encryption') or {}).get('enabled', False)}", classes="settings-value"),
+            Static("[dim]  Управление: flamquency encryption status|enable|disable[/]"),
+            Static(""),
+            Static("[dim]Редактируй ~/.flamquency/config.yaml для продвинутых настроек[/]"),
+        ]
 
+
+# ── Приложение ──────────────────────────────────────────────────────
 
 class FlamQuencyApp(App):
-    """FlamQuency-Sync Textual application."""
+    """FlamQuency-Sync Textual application — тема «Угольки»."""
     
     TITLE = "FlamQuency-Sync"
     SUB_TITLE = "File Sync with Version Control"
     
     CSS = """
+    /* Базовые поверхности (§3) */
     Screen {
         background: $surface;
     }
     
+    /* Статус-бар (§4.2) */
+    .status-bar {
+        dock: top;
+        width: 100%;
+        background: $surface-sunken;
+        height: 1;
+    }
+    
+    .status-text {
+        padding: 0 1;
+        width: 100%;
+    }
+    
+    /* Заголовки экранов (§2) */
+    .screen-title {
+        text-style: bold;
+        color: $accent;
+        padding: 1 2 0 2;
+        width: 100%;
+    }
+    
+    .screen-subtitle {
+        color: $text-muted;
+        padding: 0 2;
+        width: 100%;
+    }
+    
+    /* Главный экран (§5.1) */
     .app-title {
         text-align: center;
         text-style: bold;
         color: $accent;
         width: 100%;
-        padding: 1;
+        padding: 2 0 0 0;
     }
     
     .app-subtitle {
@@ -401,73 +529,156 @@ class FlamQuencyApp(App):
         padding-bottom: 1;
     }
     
-    .screen-title {
-        text-style: bold;
-        color: $accent;
+    .app-hint {
+        text-align: center;
+        color: $text-faint;
+        width: 100%;
+    }
+    
+    /* Боковая навигация (§4.1) */
+    NavRail {
+        width: 22;
+        background: $surface-raised;
+        border-right: solid $accent-deep;
         padding: 1;
-        width: 100%;
     }
     
-    .screen-subtitle {
-        color: $text-muted;
-        padding: 0 1 1 1;
-        width: 100%;
-    }
-    
-    .menu-btn {
-        width: 100%;
-        margin: 0 2 1 2;
-    }
-    
-    .status-text {
-        background: $panel;
-        color: $text;
-        padding: 0 1;
-        width: 100%;
-        dock: top;
-    }
-    
-    .result-box {
-        margin: 1 2;
-        padding: 1;
-        background: $panel;
-        border: solid $primary;
-        min-height: 5;
-    }
-    
-    .snapshot-btn {
-        width: 100%;
-        margin: 0 1;
-    }
-    
-    .restore-btn {
-        width: 100%;
-        margin: 0 1;
-    }
-    
-    .empty-msg {
-        color: $text-muted;
-        padding: 2;
+    .nav-logo {
         text-align: center;
         width: 100%;
     }
     
-    Input {
-        margin: 0 2;
+    .nav-title {
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        width: 100%;
+        padding-bottom: 1;
     }
     
+    .nav-btn {
+        width: 100%;
+        margin: 0 0 1 0;
+        background: $surface-raised;
+        color: $text;
+    }
+    
+    .nav-btn:hover {
+        background: $surface-overlay;
+    }
+    
+    .nav-btn-exit {
+        width: 100%;
+        margin: 0;
+    }
+    
+    /* Панель результата (§4.5) */
+    .result-box {
+        margin: 1 2;
+        padding: 1;
+        background: $surface-raised;
+        border: solid $accent;
+        min-height: 5;
+    }
+    
+    /* Поля ввода */
+    Input {
+        margin: 0 2;
+        background: $surface-sunken;
+        border: solid $accent-deep;
+    }
+    
+    Input:focus {
+        border: solid $accent;
+    }
+    
+    /* Подписи полей */
+    .field-label {
+        padding: 0 2;
+        color: $text-muted;
+    }
+    
+    /* Таблицы (§4.4) */
     DataTable {
         margin: 1 2;
-        max-height: 15;
+        background: $surface-raised;
+        max-height: 20;
+    }
+    
+    DataTable > .datatable--header {
+        background: $surface-overlay;
+        color: $text-muted;
+        text-style: bold;
+    }
+    
+    DataTable > .datatable--cursor {
+        background: $accent-deep;
+    }
+    
+    /* Кнопки (§4.3) */
+    Button {
+        margin: 0 1;
+    }
+    
+    .spacer {
+        height: 1;
+    }
+    
+    /* Настройки */
+    .settings-section {
+        color: $accent;
+        text-style: bold;
+        padding: 0 2;
+    }
+    
+    .settings-value {
+        color: $text;
+        padding: 0 2;
+    }
+    
+    /* Прогресс */
+    ProgressBar {
+        margin: 0 2;
     }
     """
+    
+    BINDINGS = [
+        Binding("ctrl+q", "quit", "Выход"),
+    ]
     
     def __init__(self, sync_engine):
         super().__init__()
         self.sync = sync_engine
+        # Тема регистрируется ДО парсинга CSS (иначе $surface-sunken не разрешится)
+        self.register_theme(FLAMQUENCY_FIRE)
+        self.theme = "flamquency-fire"
     
     def on_mount(self):
-        self.push_screen(MainScreen(self.sync))
+        self.push_screen(DashboardScreen(self.sync))
+    
+    def on_button_pressed(self, event):
+        btn_id = event.button.id or ""
+        
+        if btn_id == "nav-sync":
+            self._switch_screen(SyncScreen(self.sync))
+        elif btn_id == "nav-rollback":
+            self._switch_screen(RollbackScreen(self.sync))
+        elif btn_id == "nav-versions":
+            self._switch_screen(FileVersionsScreen(self.sync))
+        elif btn_id == "nav-encryption":
+            self._switch_screen(EncryptionScreen(self.sync))
+        elif btn_id == "nav-settings":
+            self._switch_screen(SettingsScreen(self.sync))
+        elif btn_id == "nav-exit":
+            self.exit()
+    
+    def _switch_screen(self, screen):
+        """Заменить текущий экран (swap — не стек)."""
+        if isinstance(self.screen, DashboardScreen):
+            self.push_screen(screen)
+        else:
+            self.pop_screen()
+            self.push_screen(screen)
 
 
 def run_textual_tui(sync_engine):

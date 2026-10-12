@@ -1116,6 +1116,97 @@ def test_cli_profile_commands():
     print("✓ CLI `flamquency profile` list/create/add-path/show/use/delete works")
 
 
+# ── Retention / prune ───────────────────────────────────────
+
+def _prune_engine(tmpdir):
+    """Isolated engine whose storage lives OUTSIDE the synced source.
+
+    The base dir must not sit inside the scanned tree, or each sync copies
+    its own destination and grows exponentially.
+    """
+    from flamquency.cloud import LocalBackend
+    config = dict(load_config())
+    config["use_ignore_file"] = False
+    base = Path(tmpdir) / "store"
+    src = Path(tmpdir) / "src"
+    src.mkdir(exist_ok=True)
+    backend = LocalBackend(base_path=base / "sync")
+    return FlamQuencySync(config=config, backend=backend, base_dir=base), src
+
+
+def test_prune_snapshots_keep_last():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(7):
+            (src / f"file{i}.txt").write_text(f"v{i}")
+            sync.sync(source=src)
+        assert len(sync.list_snapshots()) == 7
+
+        deleted, msg = sync.prune_snapshots(keep_last=3)
+        assert deleted == 4, f"expected 4 pruned, got {deleted}"
+        assert len(sync.list_snapshots()) == 3
+    print("✓ prune_snapshots(keep_last) removes oldest snapshots")
+
+
+def test_prune_snapshots_not_configured():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        deleted, msg = sync.prune_snapshots()
+        assert deleted == 0
+        assert "not configured" in msg
+    print("✓ prune_snapshots without policy is a safe no-op")
+
+
+def test_prune_snapshots_older_than_days():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(4):
+            (src / f"file{i}.txt").write_text(f"v{i}")
+            sync.sync(source=src)
+        # Все снапшоты только что созданы — не старше 30 дней
+        deleted, msg = sync.prune_snapshots(older_than_days=30)
+        assert deleted == 0
+        assert len(sync.list_snapshots()) == 4
+        # older_than_days=0 должен удалить всё (все старше 0 дней)
+        deleted, msg = sync.prune_snapshots(older_than_days=0)
+        assert deleted == 4
+    print("✓ prune_snapshots(older_than_days) filters by age")
+
+
+def test_prune_snapshots_combined_policy():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync, src = _prune_engine(tmpdir)
+        for i in range(6):
+            (src / f"file{i}.txt").write_text(f"v{i}")
+            sync.sync(source=src)
+        # keep_last=2 + older_than_days=0 → union: всё удаляется
+        deleted, msg = sync.prune_snapshots(keep_last=2, older_than_days=0)
+        assert deleted == 6
+    print("✓ prune_snapshots combines keep_last and older_than_days")
+
+
+# ── TUI theme ───────────────────────────────────────────────
+
+def test_theme_registered():
+    from flamquency.theme import FLAMQUENCY_FIRE
+    assert FLAMQUENCY_FIRE.name == "flamquency-fire"
+    assert FLAMQUENCY_FIRE.primary == "#FF6B1A"
+    assert FLAMQUENCY_FIRE.variables["accent"] == "#FF6B1A"
+    assert FLAMQUENCY_FIRE.variables["surface"] == "#1A1210"
+    assert FLAMQUENCY_FIRE.variables["text"] == "#F5E6DC"
+    assert FLAMQUENCY_FIRE.dark is True
+    print("✓ flamquency-fire theme carries the «Угольки» tokens")
+
+
+def test_theme_applied_to_app():
+    from flamquency.textual_tui import FlamQuencyApp
+    from flamquency.sync_engine import FlamQuencySync
+    app = FlamQuencyApp(FlamQuencySync(config=load_config()))
+    assert app.theme == "flamquency-fire"
+    assert "flamquency-fire" in [t.name for t in app.available_themes.values()]
+    print("✓ FlamQuencyApp registers and activates the fire theme")
+
+
 def main():
     print("🔥 Running FlamQuency-Sync tests...\n")
     
@@ -1165,6 +1256,12 @@ def main():
         test_sync_profile_argument_and_missing_path,
         test_status_reports_profiles,
         test_cli_profile_commands,
+        test_prune_snapshots_keep_last,
+        test_prune_snapshots_not_configured,
+        test_prune_snapshots_older_than_days,
+        test_prune_snapshots_combined_policy,
+        test_theme_registered,
+        test_theme_applied_to_app,
     ]
     
     passed = 0
