@@ -32,6 +32,22 @@ DEFAULT_CONFIG = {
     "auto_sync": False,
     "sync_interval_hours": 24,
     "last_sync": None,
+    # ── Планирование и автоматизация (v2.0) ──────────────────
+    "schedule": None,          # cron-строка или None — расписание выключено
+    "schedule_profile": None,  # профиль, который синкается по расписанию
+    "smart_autosync": True,    # умный таймаут вместо фиксированного дебаунса
+    "smart_autosync_timeout": 5,   # секунд тишины перед синком
+    "post_sync_script": None,  # путь к скрипту после успешного синка
+    # ── «Эволюция»: самообучение на привычках ────────────────
+    "evolution": {
+        "enabled": True,
+        "learning_rate": 0.3,       # 0..1 — вес новых наблюдений
+        "hot_file_threshold": 2,    # сколько правок делает файл «горячим»
+        "auto_ignore_learned": False,  # предлагать игнор по наблюдениям
+        "tracked_commands": {},     # команда → сколько раз запускали
+        "file_heat": {},            # rel_path → счётчик изменений
+        "learned_excludes": [],     # паттерны, которые эволюция предложила
+    },
     "use_ignore_file": True,  # honor ~/.flamquencyignore (gitignore-style)
     "ignore_file_path": None,  # custom path; None = ~/.flamquencyignore
     "active_profile": "default",  # which sync profile `flamquency sync` follows

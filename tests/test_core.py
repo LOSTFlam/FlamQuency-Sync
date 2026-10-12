@@ -2,6 +2,7 @@
 """Test suite for FlamQuency-Sync."""
 import sys
 import os
+import copy
 import tempfile
 import shutil
 import json
@@ -25,11 +26,15 @@ ENC_PW = "correct horse battery staple"
 def _isolated_sync(tmpdir, config=None, password=None, ignore_file=None):
     """Create a FlamQuencySync with isolated storage in a temp dir.
 
-    Hermetic by default: the real ~/.flamquencyignore is only loaded when a
-    test passes ignore_file explicitly.
+    Hermetic by default: the config is built from ``DEFAULT_CONFIG`` (never
+    the user's real ~/.flamquency/config.yaml) and the real
+    ~/.flamquencyignore is only loaded when a test passes ignore_file
+    explicitly. Otherwise a user's local settings (encryption on, learned
+    evolution heat, personal exclude patterns) would leak into the suite.
     """
     if config is None:
-        config = load_config()
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
     config = dict(config)  # copy — never mutate the caller's dict
     config["use_ignore_file"] = False
     base = Path(tmpdir) / ".flamquency_isolated"
@@ -303,6 +308,250 @@ def test_diff_visual_summary():
     assert "fq.warm" in styles  # @@ — тёплый ядро
     assert "fq.accent" in styles  # ---/+++
     print("✓ diff_text подсвечивает добавленные и удалённые строки")
+
+
+def test_schedule_parse_and_cron():
+    """Task 4 Step 1: человеческое расписание → cron."""
+    from flamquency.scheduler import parse_schedule, ScheduleError
+
+    assert parse_schedule("каждый час").cron == "0 * * * *"
+    assert parse_schedule("каждые 30 минут").cron == "*/30 * * * *"
+    assert parse_schedule("каждые 2 часа").cron == "0 */2 * * *"
+    assert parse_schedule("каждые 15 минут").cron == "*/15 * * * *"
+    assert parse_schedule("каждый день").cron == "0 3 * * *"
+    assert parse_schedule("every 2 hours").cron == "0 */2 * * *"
+    assert parse_schedule("daily").cron == "0 3 * * *"
+    assert parse_schedule("hourly").cron == "0 * * * *"
+    assert parse_schedule("weekly").cron == "0 3 * * 1"
+
+    # сырой cron проходит как есть
+    spec = parse_schedule("30 2 * * 1")
+    assert spec.cron == "30 2 * * 1" and spec.source == "raw"
+
+    # профиль запоминается
+    assert parse_schedule("каждый час", profile="work").profile == "work"
+
+    # мусор честно отбивается
+    for bad in ("", "абвгд", "* * *", "каждые 5 парсек", "каждые 0 минут"):
+        try:
+            parse_schedule(bad)
+            raise AssertionError(f"должно было упасть: {bad!r}")
+        except ScheduleError:
+            pass
+    print("✓ parse_schedule переводит расписания в cron и отбивает мусор")
+
+
+def test_scheduler_install_remove_isolation():
+    """Task 4 Step 2: install/remove идемпотентны и не трогают чужие строки."""
+    import json
+    from flamquency.scheduler import Scheduler, parse_schedule
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        store = t / "crontab.txt"
+        store.write_text("0 4 * * * /usr/bin/backup.sh\n")   # чужая запись
+        base = t / ".flamquency"
+        sched = Scheduler(base_dir=base)
+
+        # Файловый «crontab» вместо системного — тест ничего не трогает снаружи.
+        lines = {"value": []}
+
+        def fake_read():
+            return [ln for ln in store.read_text().splitlines() if ln.strip()]
+
+        def fake_write(lines):
+            store.write_text("\n".join(lines) + "\n")
+            return True, ""
+
+        sched._read_crontab = fake_read
+        sched._write_crontab = fake_write
+        sched.available = lambda: True
+
+        assert sched.status()["installed"] is False
+        assert sched.status()["live_entry"] is None
+
+        ok, msg = sched.install(parse_schedule("каждые 30 минут", profile="work"))
+        assert ok, msg
+        assert sched.status()["installed"] is True
+        assert "work" in sched.status()["live_entry"]
+        assert sched.status()["drifted"] is False
+
+        # повторная установка заменяет, а не дублирует
+        ok, msg = sched.install(parse_schedule("каждый час"))
+        assert ok, msg
+        lines_now = [ln for ln in store.read_text().splitlines() if ln.strip()]
+        assert len(lines_now) == 2                       # наша + чужая
+        assert sum(1 for ln in lines_now if "flamquency-schedule" in ln) == 1
+
+        # состояние сохранено на диск
+        assert json.loads((base / "schedule.json").read_text())["cron"] == "0 * * * *"
+
+        ok, msg = sched.remove()
+        assert ok, msg
+        assert sched.status()["installed"] is False
+        assert store.read_text() == "0 4 * * * /usr/bin/backup.sh\n"   # чужое цело
+        assert not (base / "schedule.json").exists()
+
+        # повторное снятие — не ошибка
+        ok, msg = sched.remove()
+        assert not ok and "не настроено" in msg
+        print("✓ scheduler ставит/снимает расписание, не задевая чужие записи")
+
+
+def test_smart_autosync_quiet_period():
+    """Task 4 Step 4: умный дебаунс вместо фиксированных 5 секунд."""
+    from datetime import datetime, timedelta
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        assert sync.smart_sync_quiet_period() == 5.0
+
+        sync.config["smart_autosync"] = False
+        assert sync.smart_sync_quiet_period() == 0.0
+        assert sync.should_sync_now(datetime.now()) is False
+
+        sync.config["smart_autosync"] = True
+        sync.config["smart_autosync_timeout"] = 10
+        now = datetime.now()
+        assert sync.should_sync_now(now - timedelta(seconds=9)) is False
+        assert sync.should_sync_now(now - timedelta(seconds=11)) is True
+        assert sync.should_sync_now(None) is False   # изменений не было
+
+        # мусор в конфиге не роняет расчёт
+        sync.config["smart_autosync_timeout"] = "не число"
+        assert sync.smart_sync_quiet_period() == 5.0
+    print("✓ умный автосинк считает тишину и переживает мусор в конфиге")
+
+
+def test_post_sync_hook():
+    """Task 4 Step 5: пост-синк хук запускается и сообщает о failures."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        t = Path(tmpdir)
+
+        # хук не задан — не ошибка
+        ok, msg = sync.run_post_sync_hook()
+        assert ok and msg == "хук не задан"
+
+        # нет такого файла
+        sync.config["post_sync_script"] = str(t / "нет.sh")
+        ok, msg = sync.run_post_sync_hook()
+        assert not ok and "не найден" in msg
+
+        # падающий скрипт → отчёт, но не исключение
+        bad = t / "bad.sh"
+        bad.write_text("#!/bin/sh\necho boom >&2\nexit 3\n")
+        bad.chmod(0o755)
+        sync.config["post_sync_script"] = str(bad)
+        ok, msg = sync.run_post_sync_hook()
+        assert not ok and "3" in msg and "boom" in msg
+
+        # хороший скрипт → его вывод возвращается
+        good = t / "good.sh"
+        good.write_text("#!/bin/sh\necho 'уведомление отправлено'\n")
+        good.chmod(0o755)
+        sync.config["post_sync_script"] = str(good)
+        ok, msg = sync.run_post_sync_hook()
+        assert ok and "уведомление отправлено" in msg
+    print("✓ пост-синк хук запускается и корректно сообщает об ошибках")
+
+
+def test_evolution_learns_and_suggests():
+    """«Эволюция»: жар файлов, предложения, применение, забывание."""
+    from flamquency.evolution import Evolution
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        t = Path(tmpdir)
+        work = t / "work"
+        (work / "notes").mkdir(parents=True)
+        todo = work / "notes" / "todo.md"
+        cold = work / "cold.txt"
+        cold.write_text("раз")
+
+        for i in range(6):
+            todo.write_text(f"итерация {i}\n")
+            sync.sync(source=work)
+
+        evo = Evolution(config=sync.config)
+        # жар накопился у правившегося файла
+        assert evo.settings["file_heat"]["notes/todo.md"] > 1
+        assert evo.is_hot("notes/todo.md")
+        assert not evo.is_hot("cold.txt")
+
+        # предложения появились
+        kinds = {s["kind"] for s in evo.suggest()}
+        assert "hot_files" in kinds
+        assert "profile_candidate" in kinds
+
+        # применяются
+        results = evo.apply_all()
+        assert all(r["ok"] for r in results), results
+        assert "notes" in sync.config["profiles"]
+
+        # команды тоже считаются
+        evo.observe_command("sync")
+        evo.observe_command("sync")
+        evo.observe_command("diff")
+        assert evo.command_ranking()[0] == ("sync", 2)
+
+        # забывание остыжает жар
+        heat_before = evo.settings["file_heat"]["notes/todo.md"]
+        evo.decay(factor=0.5)
+        assert evo.settings["file_heat"]["notes/todo.md"] < heat_before
+
+        # выключенная эволюция молчит
+        evo.settings["enabled"] = False
+        assert evo.observe_file("x.md") == 0
+        assert evo.suggest() == []
+
+        # сводка отдаёт всё нужное CLI
+        evo.settings["enabled"] = True
+        summary = evo.summary()
+        assert summary["enabled"] and summary["tracked_files"] >= 1
+        assert summary["hot_files"]
+    print("✓ эволюция учится на привычках, предлагает и применяет улучшения")
+
+
+def test_evolution_survives_broken_state():
+    """Эволюция не должна ронять синк даже при испорченном состоянии."""
+    from flamquency.evolution import Evolution
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sync = _isolated_sync(tmpdir)
+        sync.config["evolution"] = {
+            "enabled": True,
+            "learning_rate": "мусор",
+            "hot_file_threshold": None,
+            "file_heat": {"a.md": "не число"},
+        }
+        # падающие операции не бросают наружу
+        assert Evolution(config=sync.config).observe_file("a.md") >= 0
+        assert sync._evolve_observe() >= 0
+        assert isinstance(Evolution(config=sync.config).hot_files(), list)
+        assert isinstance(Evolution(config=sync.config).suggest(), list)
+    print("✓ эволюция переживает испорченное состояние")
+
+
+def test_config_carries_v2_sections():
+    """Task 4: конфиг v2 несёт расписание, умный синк, хук и эволюцию."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Изолированный файл конфига — тест не читает и не пишет реальный.
+        cfg_path = Path(tmpdir) / "config.yaml"
+        config = load_config(config_path=cfg_path)
+        assert config["schedule"] is None
+        assert config["schedule_profile"] is None
+        assert config["smart_autosync"] is True
+        assert config["smart_autosync_timeout"] == 5
+        assert config["post_sync_script"] is None
+        evo = config["evolution"]
+        assert evo["enabled"] is True
+        assert evo["file_heat"] == {}
+        assert evo["tracked_commands"] == {}
+        assert evo["hot_file_threshold"] >= 1
+
+        # значения по умолчанию не протекают между загрузками
+        config["evolution"]["file_heat"]["x"] = 5
+        fresh = load_config(config_path=cfg_path)
+        assert fresh["evolution"]["file_heat"] == {}
+    print("✓ конфиг v2 несёт секции расписания, хуков и эволюции")
 
 
 def test_rollback_snapshot():
@@ -1062,7 +1311,8 @@ def test_sync_uses_active_profile_paths():
         code = t / "code"; code.mkdir()
         (code / "b.txt").write_text("B")
 
-        config = dict(load_config())
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["use_ignore_file"] = False
         create_profile(config, "multi", [str(docs), str(code)])
         set_active(config, "multi")
@@ -1098,7 +1348,8 @@ def test_sync_explicit_source_beats_profile():
         other = t / "other"; other.mkdir()
         (other / "c.txt").write_text("C")
 
-        config = dict(load_config())
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["use_ignore_file"] = False
         create_profile(config, "multi", [str(docs)])
         set_active(config, "multi")
@@ -1124,7 +1375,8 @@ def test_sync_profile_argument_and_missing_path():
         docs = t / "docs"; docs.mkdir()
         (docs / "a.txt").write_text("A")
 
-        config = dict(load_config())
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["use_ignore_file"] = False
         create_profile(config, "work", [str(docs)])
         create_profile(config, "broken", [str(t / "ghost")])
@@ -1160,7 +1412,8 @@ def test_status_reports_profiles():
         from flamquency.profiles import create_profile, set_active
         t = Path(tmpdir)
         docs = t / "docs"; docs.mkdir()
-        config = dict(load_config())
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["use_ignore_file"] = False
         create_profile(config, "multi", [str(docs)])
         set_active(config, "multi")
@@ -1257,7 +1510,8 @@ def _prune_engine(tmpdir):
     its own destination and grows exponentially.
     """
     from flamquency.cloud import LocalBackend
-    config = dict(load_config())
+    from flamquency.config import DEFAULT_CONFIG
+    config = copy.deepcopy(DEFAULT_CONFIG)
     config["use_ignore_file"] = False
     base = Path(tmpdir) / "store"
     src = Path(tmpdir) / "src"
@@ -1384,7 +1638,8 @@ def test_sync_progress_spans_profile_roots():
         code = t / "code"; code.mkdir()
         (code / "c.txt").write_text("C")
 
-        config = dict(load_config())
+        from flamquency.config import DEFAULT_CONFIG
+        config = copy.deepcopy(DEFAULT_CONFIG)
         config["use_ignore_file"] = False
         create_profile(config, "multi", [str(docs), str(code)])
         set_active(config, "multi")
@@ -1602,6 +1857,13 @@ def main():
         test_restore_and_view_file_content,
         test_restore_tree_directory_and_profile,
         test_diff_visual_summary,
+        test_schedule_parse_and_cron,
+        test_scheduler_install_remove_isolation,
+        test_smart_autosync_quiet_period,
+        test_post_sync_hook,
+        test_evolution_learns_and_suggests,
+        test_evolution_survives_broken_state,
+        test_config_carries_v2_sections,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,

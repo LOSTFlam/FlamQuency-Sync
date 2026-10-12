@@ -80,6 +80,9 @@ class FlamQuencySync:
         )
         self.version_dir = self.base_dir / "versions" / "files"
         self.version_dir.mkdir(parents=True, exist_ok=True)
+        # Старт текущего прохода синка — по нему «Эволюция» отличает
+        # «файл изменился» от «файл просто лежит в хранилище».
+        self._sync_started_at = None
 
     def _setup_ignore(self, ignore_file):
         """Load .flamquencyignore rules (gitignore-style syntax).
@@ -388,6 +391,7 @@ class FlamQuencySync:
         (0/total на весь прогон) и по событию на каждый файл.
         """
         self._require_unlocked()
+        self._sync_started_at = datetime.now()
 
         if source is not None:
             # Explicit source wins — plain single-root sync, no profile.
@@ -463,14 +467,54 @@ class FlamQuencySync:
         return combined
 
     def _finish_sync(self, result):
-        """Bookkeeping shared by every sync flavour: stamp last_sync, save."""
+        """Bookkeeping shared by every sync flavour: stamp last_sync, save.
+
+        Здесь же «Эволюция» получает свой урок: файлы, у которых в этом
+        проходе выросла история, получают +1 к жару. Сбой эволюции никогда
+        не роняет синк — она косметика.
+        """
         self.config["last_sync"] = datetime.now().isoformat()
         from flamquency.config import save_config
         # Save into this engine's base dir (== ~/.flamquency by default),
         # so isolated instances never touch the real user config.
         save_config(self.config, config_path=self.base_dir / "config.yaml")
         result.timestamp = datetime.now().isoformat()
+        self._evolve_observe()
         return result
+
+    def _evolve_observe(self):
+        """Нагреть жар только тех файлов, что изменились в этом проходе.
+
+        Критерий — отметка времени последней записи истории **новее старта
+        этого синка**: неподвижный файл, который просто лежит в хранилище,
+        жара не получает, даже если синк запускают каждую секунду.
+        """
+        try:
+            evolution = self.config.get("evolution")
+            if not isinstance(evolution, dict) or not evolution.get("enabled", True):
+                return 0
+            since = self._sync_started_at
+            if since is None:
+                return 0
+            from flamquency.evolution import Evolution
+            evo = Evolution(config=self.config)
+            heated = 0
+            for key in self.version_store.tracked_keys():
+                history = self.version_store.get_history(key)
+                if not history:
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(history[-1]["timestamp"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if stamp >= since:
+                    evo.observe_file(key, weight=1)
+                    heated += 1
+            if heated:
+                evo.save()
+            return heated
+        except Exception:
+            return 0
     
     def _find_rel_path(self, file_path):
         """Try to find a relative path key that exists in version store."""
@@ -853,3 +897,56 @@ class FlamQuencySync:
             "profiles": profile_names(self.config),
             "profile_count": len(self.config["profiles"]),
         }
+
+    # ── умный автосинк: «тихий» дебаунс ───────────────────────
+
+    def smart_sync_quiet_period(self):
+        """Сколько секунд тишины нужно, чтобы синк стал «умным».
+
+        Умный режим выключен в конфиге → 0 (синк сразу, как раньше).
+        """
+        if not self.config.get("smart_autosync", True):
+            return 0
+        try:
+            timeout = float(self.config.get("smart_autosync_timeout", 5))
+        except (TypeError, ValueError):
+            timeout = 5.0
+        return max(0.0, timeout)
+
+    def should_sync_now(self, last_change_at, now=None):
+        """Пора ли синкаться: тишина дольше порога → да.
+
+        ``last_change_at`` — время последнего замеченного изменения
+        (datetime или None). None → «изменений не было», синк не нужен.
+        """
+        from datetime import datetime
+        quiet = self.smart_sync_quiet_period()
+        if quiet <= 0 or last_change_at is None:
+            return False
+        now = now or datetime.now()
+        return (now - last_change_at).total_seconds() >= quiet
+
+    def run_post_sync_hook(self):
+        """Запустить post-sync скрипт из конфига.
+
+        Возвращает (ok, сообщение). Скрипт не задан → (True, «хук не задан»).
+        Ошибка скрипта не роняет синк — она возвращается как результат.
+        """
+        import subprocess
+        script = self.config.get("post_sync_script")
+        if not script:
+            return True, "хук не задан"
+        script_path = Path(str(script)).expanduser()
+        if not script_path.exists():
+            return False, f"post-sync скрипт не найден: {script_path}"
+        try:
+            proc = subprocess.run(
+                [str(script_path)], capture_output=True, text=True,
+                timeout=300,
+            )
+        except Exception as e:
+            return False, f"post-sync скрипт упал: {e}"
+        if proc.returncode != 0:
+            return False, (f"post-sync скрипт вернул {proc.returncode}: "
+                           f"{(proc.stderr or proc.stdout or '').strip()}")
+        return True, (proc.stdout or "").strip() or "хук выполнен"

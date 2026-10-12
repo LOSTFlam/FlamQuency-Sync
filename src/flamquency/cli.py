@@ -28,6 +28,7 @@ from flamquency.style import (
     human_size, human_time, PALETTE, diff_text,
 )
 from flamquency.icons import icon
+from flamquency.scheduler import sync_command
 from flamquency.updater import check_for_update, perform_update
 
 ENV_PASSWORD = "FLAMQUENCY_PASSWORD"
@@ -131,12 +132,41 @@ def cmd_sync(args):
     if result.paths:
         table = make_table(
             ["Путь", "Файлов"],
-            [(f"{icon('folder')} {e['label']}", e['files_synced'])
+            [(f"{icon('folder')} {e['label']}", e["files_synced"])
              for e in result.paths],
         )
         console.print(table)
 
+    # «Эволюция» наблюдает за синком: жар файлов + пост-хук
+    _evolve_observe_sync(console, sync, result)
+
+    hook_ok, hook_msg = sync.run_post_sync_hook()
+    if hook_msg != "хук не задан":
+        if hook_ok:
+            console.print(f"[fq.faint]{icon('hook')} {hook_msg}[/]")
+        else:
+            console.print(warning_panel(
+                console, hook_msg, title="Пост-синк хук", icon_name="hook"))
+
     return 0 if not result.errors else 1
+
+
+def _evolve_observe_sync(console, sync, result):
+    """Отметить запущенную команду в «Эволюции» (жар файлов копит движок).
+
+    CLI знает то, чего не знает движок: какую команду вызвали. Жар файлов
+    считается внутри ``sync_engine._finish_sync`` — здесь только команды.
+    """
+    try:
+        from flamquency.evolution import Evolution
+        evo = Evolution(config=sync.config)
+        if not evo.enabled:
+            return
+        command = getattr(result, "profile", None) or "sync"
+        evo.observe_command(command)
+        evo.save()
+    except Exception:
+        pass
 
 
 def cmd_rollback(args):
@@ -445,6 +475,166 @@ def _tree_progress(console):
             state["bar"].stop()
 
     return cb
+
+
+def cmd_schedule(args):
+    """Manage the sync schedule: show / set / remove."""
+    from flamquency.scheduler import (
+        Scheduler, parse_schedule, ScheduleError, describe_next,
+    )
+    console = get_console()
+    scheduler = Scheduler()
+
+    if args.remove:
+        ok, msg = scheduler.remove()
+        if ok:
+            config = load_config()
+            config["schedule"] = None
+            config["schedule_profile"] = None
+            save_config(config)
+            console.print(success_panel(console, msg,
+                                        title="Расписание снято",
+                                        icon_name="clock"))
+            return 0
+        console.print(error_panel(console, msg, icon_name="error"))
+        return 1
+
+    if not args.interval:
+        status = scheduler.status()
+        if not status.get("installed"):
+            console.print(info_panel(
+                console,
+                "Расписание не настроено.\n"
+                "Поставить: flamquency schedule «каждый час» [--profile ИМЯ]\n"
+                "Примеры: «каждые 30 минут», «daily», «0 3 * * *»",
+                title=f"{icon('clock')} Расписание", icon_name="clock"))
+            if not status.get("available"):
+                console.print(warning_panel(
+                    console,
+                    f"В системе нет {status['backend']} — ставить нечего.",
+                    title="Планировщик недоступен", icon_name="warning"))
+            return 0
+        spec = status["spec"]
+        body = [
+            f"Описание: {status['description']}",
+            f"Cron: {status['cron']}",
+            f"Профиль: {status['profile'] or '— активный —'}",
+            f"Команда: {status['command']}",
+            f"Бэкенд: {status['backend']}",
+        ]
+        if status.get("drifted"):
+            body.append("\n⚠ Запись в системе отличается от сохранённой — "
+                        "переустановите: schedule <интервал>")
+        console.print(card(console, Text("\n".join(body), style="fq.body"),
+                           title=f"{icon('clock')} Расписание",
+                           icon_name="clock"))
+        return 0
+
+    try:
+        spec = parse_schedule(args.interval, profile=args.profile)
+    except ScheduleError as e:
+        console.print(error_panel(console, str(e), icon_name="error"))
+        return 1
+
+    ok, msg = scheduler.install(spec)
+    if not ok:
+        console.print(error_panel(console, msg, icon_name="error"))
+        return 1
+
+    config = load_config()
+    config["schedule"] = spec.cron
+    config["schedule_profile"] = spec.profile or config.get("active_profile")
+    save_config(config)
+
+    console.print(success_panel(
+        console,
+        f"{msg}\nПрофиль: {spec.profile or 'активный'}\n"
+        f"Команда: {sync_command(spec.profile)}",
+        title="Расписание установлено", icon_name="clock"))
+    console.print(f"[fq.faint]Снять: flamquency schedule --remove · "
+                  f"показать: flamquency schedule[/]")
+    return 0
+
+
+def cmd_evolve(args):
+    """«Эволюция»: показать или применить самообученные улучшения."""
+    from flamquency.evolution import Evolution
+    console = get_console()
+    evo = Evolution()
+
+    if args.decay:
+        cooled = evo.decay()
+        evo.save()
+        console.print(success_panel(
+            console, f"Остыло и забыто записей: {cooled}",
+            title="Жар охлаждён", icon_name="memory"))
+        return 0
+
+    if args.forget:
+        for rel_path in args.forget:
+            evo.settings["file_heat"].pop(rel_path, None)
+        evo.save()
+        console.print(success_panel(
+            console, f"Забыто файлов: {len(args.forget)}",
+            title="Память очищена", icon_name="memory"))
+        return 0
+
+    if args.apply:
+        results = evo.apply_all()
+        if not results:
+            console.print(info_panel(
+                console, "Эволюции пока нечего предложить — "
+                         "поработайте с программой ещё немного.",
+                title="Пусто", icon_name="memory"))
+            return 0
+        evo.save()
+        rows = []
+        failed = 0
+        for r in results:
+            glyph = icon("success") if r["ok"] else icon("error")
+            failed += 0 if r["ok"] else 1
+            rows.append((glyph, r["kind"], r["message"]))
+        console.print(card(console, make_table(
+            ["", "Тип", "Результат"], rows),
+            title=f"{icon('kaleido')} Эволюция применилась"))
+        return 1 if failed else 0
+
+    # Показ: сводка + предложения
+    summary = evo.summary()
+    if not summary["enabled"]:
+        console.print(info_panel(
+            console, "Эволюция выключена в конфиге (evolution.enabled: false).",
+            title="Эволюция спит", icon_name="memory"))
+        return 0
+
+    lines = [
+        f"Отслежено файлов: {summary['tracked_files']}",
+        f"Отслежено команд: {summary['tracked_commands']}",
+        f"Выученных исключений: {summary['learned_excludes']}",
+    ]
+    if summary["hot_files"]:
+        hot = ", ".join(f"{p} ({h:.1f})" for p, h in summary["hot_files"])
+        lines.append(f"\nСамые горячие: {hot}")
+    if summary["hot_directories"]:
+        dirs = ", ".join(f"{d} ({h:.1f})" for d, h in summary["hot_directories"])
+        lines.append(f"Горячие каталоги: {dirs}")
+    if summary["command_ranking"]:
+        cmds = ", ".join(f"{c}×{n}" for c, n in summary["command_ranking"])
+        lines.append(f"Частые команды: {cmds}")
+    console.print(card(console, Text("\n".join(lines), style="fq.body"),
+                       title=f"{icon('kaleido')} Эволюция",
+                       icon_name="kaleido"))
+
+    suggestions = evo.suggest()
+    if not suggestions:
+        console.print("[fq.faint]Пока нечего предложить — жар ещё не набран.[/]")
+        return 0
+
+    rows = [(icon("lightbulb"), s["title"], s["detail"]) for s in suggestions]
+    console.print(card(console, make_table(["", "Предложение", "Почему"], rows),
+                       title=f"{icon('kaleido')} {len(suggestions)} предложение(й)"))
+    console.print("[fq.faint]Применить всё: flamquency evolve --apply[/]")
+    return 0
 
 
 def cmd_status(args):
@@ -1217,6 +1407,27 @@ def main():
                       help="Print a table of restored files")
     p_rt.add_argument("--password", "-p", help="Blob store password")
 
+    # schedule
+    p_sched = subparsers.add_parser(
+        "schedule", help="Set up a recurring sync schedule (cron / Task Scheduler)")
+    p_sched.add_argument("interval", nargs="?",
+                         help="«каждый час», «каждые 30 минут», «daily», "
+                              "или cron из 5 полей")
+    p_sched.add_argument("--profile", "-P", metavar="NAME",
+                         help="Profile to sync on schedule")
+    p_sched.add_argument("--remove", action="store_true",
+                         help="Remove the current schedule")
+
+    # evolve
+    p_evo = subparsers.add_parser(
+        "evolve", help="«Эволюция»: самообучение на привычках и предложения")
+    p_evo.add_argument("--apply", action="store_true",
+                       help="Apply every suggestion")
+    p_evo.add_argument("--decay", action="store_true",
+                       help="Cool down all file heat")
+    p_evo.add_argument("--forget", nargs="+", metavar="PATH",
+                       help="Forget these files' heat")
+
     # status
     subparsers.add_parser("status", help="Show sync status")
     
@@ -1337,6 +1548,8 @@ def main():
         "restore-content": cmd_restore_content,
         "view-content": cmd_view_content,
         "restore-tree": cmd_restore_tree,
+        "schedule": cmd_schedule,
+        "evolve": cmd_evolve,
         "status": cmd_status,
         "diff": cmd_diff,
         "snapshots": cmd_snapshots,
