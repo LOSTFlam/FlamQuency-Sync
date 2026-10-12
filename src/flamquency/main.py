@@ -8,9 +8,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from flamquency.sync_engine import FlamQuencySync
 from flamquency.config import load_config
 from flamquency.cloud import get_backend, LocalBackend
-from flamquency.tui import run_tui
+
 
 def main():
+    """Launch the Textual TUI."""
     config = load_config()
     
     if "__version__" not in config:
@@ -19,17 +20,22 @@ def main():
     backend_type = config.get("cloud_backend", "local")
     if backend_type == "local":
         backend = LocalBackend()
-    else:
-        backend = get_backend(backend_type,
+    elif backend_type == "github":
+        backend = get_backend("github",
                              repo_name=config.get("cloud_repo_name"),
-                             token=config.get("github_token"),
-                             credentials_path=config.get("google_credentials"))
+                             token=config.get("github_token"))
+    else:
+        backend = LocalBackend()
     
     if not backend.authenticate():
         print("Warning: Backend authentication may have issues")
     
     sync = FlamQuencySync(config=config, backend=backend)
-    run_tui(sync)
+    
+    # Use Textual TUI
+    from flamquency.textual_tui import run_textual_tui
+    run_textual_tui(sync)
+
 
 if __name__ == "__main__":
     main()

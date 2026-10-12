@@ -13,10 +13,11 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "flamquency=flamquency.main:main",
+            "flamquency=flamquency.cli:main",
+            "flamquency-tui=flamquency.main:main",
         ],
     },
-    description="Terminal-based file synchronization with rollback",
+    description="Terminal-based file synchronization with version control",
     long_description=open("README.md").read() if os.path.exists("README.md") else "",
     url="https://github.com/LOSTFlam/FlamQuency-Sync",
     author="LOSTFlam",
