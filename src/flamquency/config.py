@@ -11,8 +11,40 @@ DATA_PATH = XDG_HOME / "data"
 
 # Default configuration
 DEFAULT_CONFIG = {
-    "cloud_backend": "local",  # local, github, google_drive
+    "cloud_backend": "local",  # local, github, s3, smb, nfs, gdrive, dropbox
     "cloud_repo_name": "flamquency-sync-{username}",
+    # ── Настройки бэкендов (v2.0) ───────────────────────────
+    # Каждый бэкенд — именованная запись; `backends.default` выбирается
+    # при отсутствии явного выбора. Секреты НЕ хранятся здесь: только
+    # ссылки на переменные окружения (см. docs/BACKENDS.md).
+    "backends": {
+        "s3": {
+            "endpoint": "",          # "" → AWS; иначе https://s3.example
+            "region": "us-east-1",
+            "bucket": "",
+            "prefix": "flamquency/",
+            "access_key_env": "FLAMQUENCY_S3_ACCESS_KEY",
+            "secret_key_env": "FLAMQUENCY_S3_SECRET_KEY",
+        },
+        "smb": {
+            "server": "",            # //server/share
+            "mount_point": "",       # куда монтировать (Linux/macOS)
+            "username_env": "FLAMQUENCY_SMB_USER",
+            "password_env": "FLAMQUENCY_SMB_PASSWORD",
+        },
+        "nfs": {
+            "server": "",            # server:/export/path
+            "mount_point": "",
+        },
+        "gdrive": {
+            "folder_id": "",
+            "token_env": "FLAMQUENCY_GDRIVE_TOKEN",
+        },
+        "dropbox": {
+            "path": "/flamquency",
+            "token_env": "FLAMQUENCY_DROPBOX_TOKEN",
+        },
+    },
     "exclude_patterns": [
         # Internal FlamQuency directories (prevent recursion)
         "**/.flamquency/sync/**",

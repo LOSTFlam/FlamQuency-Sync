@@ -52,22 +52,25 @@ def resolve_password(args_password=None):
     return None
 
 
-def get_sync_engine(config=None, password=None):
-    """Initialize sync engine with configured backend."""
+def get_sync_engine(config=None, password=None, backend_name=None):
+    """Initialize sync engine with the configured (or requested) backend.
+
+    Бэкенды v2.0 создаются через ``backends.create_backend`` — он честно
+    падает с понятной ошибкой, если облаку не хватает библиотеки, настройки
+    или секрета. ``local`` остаётся значением по умолчанию, поэтому старое
+    поведение не меняется.
+    """
+    from flamquency.backends import create_backend, BackendError
+
     if config is None:
         config = load_config()
 
-    backend_type = config.get("cloud_backend", "local")
-    if backend_type == "local":
-        backend = LocalBackend()
-    elif backend_type == "github":
-        backend = get_backend("github",
-                             repo_name=config.get("cloud_repo_name"),
-                             token=config.get("github_token"))
-    else:
-        backend = LocalBackend()
+    try:
+        backend = create_backend(config, name=backend_name)
+        backend.authenticate()
+    except BackendError:
+        raise
 
-    backend.authenticate()
     if password is None and (config.get("encryption") or {}).get("enabled"):
         # Only ask for a password when the store is actually encrypted
         password = resolve_password(None)
@@ -475,6 +478,118 @@ def _tree_progress(console):
             state["bar"].stop()
 
     return cb
+
+
+def cmd_backend(args):
+    """Управление бэкендами: список, выбор, проверка готовности.
+
+    Принимает обе формы: ``backend check s3`` / ``backend use s3`` и
+    флаговую ``backend --check s3`` / ``backend --use s3``.
+    """
+    from flamquency.backends import (
+        BACKENDS, backend_names, describe_backend, create_backend,
+        BackendError,
+    )
+    console = get_console()
+
+    action = getattr(args, "action", None) or "list"
+    target = (getattr(args, "name", None)
+              or getattr(args, "check", None)
+              or getattr(args, "use", None))
+    if action == "check" or getattr(args, "check", None):
+        action, target = "check", target
+    elif action == "use" or getattr(args, "use", None):
+        action, target = "use", target
+
+    if action == "check":
+        if not target:
+            console.print(error_panel(
+                console, "Укажите бэкенд: flamquency backend check ИМЯ",
+                icon_name="error"))
+            return 1
+        config = load_config()
+        if target not in BACKENDS:
+            console.print(error_panel(
+                console,
+                f"Неизвестный бэкенд: {target!r}\n"
+                f"Доступны: {', '.join(backend_names())}",
+                icon_name="error"))
+            return 1
+        ok, problems, description = describe_backend(config, target)
+        if ok:
+            console.print(success_panel(
+                console,
+                f"{BACKENDS[target]['title']} готов к работе.\n{description}",
+                title=f"{icon('cloud-on')} Бэкенд {target}",
+                icon_name="cloud-on"))
+            return 0
+        console.print(error_panel(
+            console, "\n".join(f"• {p}" for p in problems),
+            title=f"{icon('cloud-off')} Бэкенд {target} не готов",
+            icon_name="cloud-off"))
+        return 1
+
+    if action == "use":
+        if not target:
+            console.print(error_panel(
+                console, "Укажите бэкенд: flamquency backend use ИМЯ",
+                icon_name="error"))
+            return 1
+        config = load_config()
+        if target not in BACKENDS:
+            console.print(error_panel(
+                console,
+                f"Неизвестный бэкенд: {target!r}\n"
+                f"Доступны: {', '.join(backend_names())}",
+                icon_name="error"))
+            return 1
+        ok, problems, _ = describe_backend(config, target)
+        if not ok:
+            console.print(error_panel(
+                console,
+                "Бэкенд не готов, переключение отменено:\n"
+                + "\n".join(f"• {p}" for p in problems),
+                title=f"{icon('cloud-off')} {target}", icon_name="cloud-off"))
+            return 1
+        config["cloud_backend"] = target
+        save_config(config)
+        console.print(success_panel(
+            console,
+            f"Активный бэкенд: {target} — {BACKENDS[target]['title']}",
+            title="Бэкенд переключён", icon_name="cloud-on"))
+        return 0
+
+    config = load_config()
+    active = config.get("cloud_backend", "local")
+    rows = []
+    for name in backend_names():
+        spec = BACKENDS[name]
+        ok, problems, _ = describe_backend(config, name)
+        mark = "→" if name == active else " "
+        state = icon("cloud-on") if ok else icon("cloud-off")
+        missing = "" if ok else f" ({len(problems)})"
+        rows.append((mark, f"{state} {name}", spec["title"], missing))
+
+    console.print(card(
+        console, make_table(["", "Бэкенд", "Что это", "Не хватает"], rows),
+        title=f"{icon('cloud')} Бэкенды — активен: {active}"))
+
+    console.print("[fq.faint]Переключить: flamquency backend use ИМЯ · "
+                  "проверить: flamquency backend check ИМЯ[/]")
+    console.print("[fq.faint]Секреты — только в переменных окружения, "
+                  "см. docs/BACKENDS.md[/]")
+
+    # Живой статус активного бэкенда
+    try:
+        live = create_backend(config).get_status()
+        console.print(key_value([
+            (k, str(v)) for k, v in live.items() if v not in (None, "")
+        ]))
+    except BackendError as e:
+        console.print(warning_panel(console, str(e),
+                                    title="Активный бэкенд недоступен",
+                                    icon_name="warning"))
+    return 0
 
 
 def cmd_schedule(args):
@@ -1418,6 +1533,19 @@ def main():
     p_sched.add_argument("--remove", action="store_true",
                          help="Remove the current schedule")
 
+    # backend
+    p_be = subparsers.add_parser(
+        "backend", help="Manage storage backends: list / use / check")
+    p_be.add_argument("action", nargs="?",
+                      choices=["list", "use", "check"], default="list",
+                      help="What to do (default: list)")
+    p_be.add_argument("name", nargs="?",
+                      help="Backend name for use/check")
+    p_be.add_argument("--use", metavar="NAME",
+                      help="Switch the active backend to NAME")
+    p_be.add_argument("--check", metavar="NAME",
+                      help="Check whether NAME is ready to use")
+
     # evolve
     p_evo = subparsers.add_parser(
         "evolve", help="«Эволюция»: самообучение на привычках и предложения")
@@ -1549,6 +1677,7 @@ def main():
         "view-content": cmd_view_content,
         "restore-tree": cmd_restore_tree,
         "schedule": cmd_schedule,
+        "backend": cmd_backend,
         "evolve": cmd_evolve,
         "status": cmd_status,
         "diff": cmd_diff,

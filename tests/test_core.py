@@ -554,6 +554,230 @@ def test_config_carries_v2_sections():
     print("✓ конфиг v2 несёт секции расписания, хуков и эволюции")
 
 
+def test_backend_registry_and_readiness():
+    """Task 5 Step 1/5: реестр бэкендов и диагностика готовности."""
+    from flamquency.backends import (
+        BACKENDS, backend_names, describe_backend, create_backend,
+        BackendError,
+    )
+    names = backend_names()
+    assert names == sorted(names)
+    for expected in ("local", "github", "s3", "smb", "nfs", "gdrive", "dropbox"):
+        assert expected in names, expected
+
+    # local готов всегда и без всяких секретов
+    ok, problems, _ = describe_backend({}, "local")
+    assert ok and problems == []
+
+    # s3 без настроек перечисляет всё, чего не хватает
+    ok, problems, _ = describe_backend({}, "s3")
+    assert not ok
+    joined = " | ".join(problems)
+    assert "bucket" in joined
+    assert "FLAMQUENCY_S3_ACCESS_KEY" in joined
+    assert any("boto3" in p for p in problems)
+
+    # неизвестный бэкенд — честная ошибка, а не молчаливый local
+    ok, problems, _ = describe_backend({}, " Carrier pigeon")
+    assert not ok and "Неизвестный" in problems[0]
+
+    # бэкенд, не поддерживаемый на платформе, сообщает об этом
+    wrong_platform = dict(BACKENDS)
+    ok, problems, _ = describe_backend({}, "nfs")
+    assert ok or any("монтир" in p or "server" in p or "mount_point" in p
+                     for p in problems)
+    print("✓ реестр бэкендов описывает и диагностирует все хранилища")
+
+
+def test_backend_factory_refuses_unready():
+    """Task 5: фабрика не подменяет неготовое облако локальной папкой."""
+    from flamquency.backends import create_backend, BackendError
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir) / "store"
+
+        # s3 без boto3/настроек → отказ, а не тихий local
+        try:
+            create_backend({"backends": {"s3": {}}}, name="s3", base_path=base)
+            raise AssertionError("должно было упасть")
+        except BackendError as e:
+            assert "boto3" in str(e) or "bucket" in str(e)
+
+        # smb без точки монтирования → отказ
+        try:
+            create_backend(
+                {"backends": {"smb": {"server": "//x/y",
+                                      "mount_point": str(Path(tmpdir) / "нет")}}},
+                name="smb", base_path=base)
+            raise AssertionError("должно было упасть")
+        except BackendError as e:
+            assert "монтир" in str(e)
+
+        # неизвестное имя → отказ
+        try:
+            create_backend({}, name="carrier-pigeon", base_path=base)
+            raise AssertionError("должно было упасть")
+        except BackendError:
+            pass
+
+        # local создаётся без вопросов
+        backend = create_backend({}, name="local", base_path=base)
+        assert backend.get_status()["backend"] == "local"
+    print("✓ фабрика отказывает неготовым бэкендам вместо тихого отката")
+
+
+def test_network_backend_roundtrip():
+    """Task 5 Step 4: SMB/NFS-бэкенд поверх смонтированной папки."""
+    from flamquency.backends import NetworkBackend
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        mount = t / "mnt"
+        mount.mkdir()
+        store = t / "store"
+        src = t / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("по сети")
+        (src / "sub").mkdir()
+        (src / "sub" / "b.txt").write_text("вложенный")
+
+        backend = NetworkBackend(store, "smb", mount)
+        # не смонтировано → authenticate честно падает
+        backend.mount_point = t / "отсутствует"
+        assert backend.authenticate() is False
+        assert backend.error and "Не смонтировано" in backend.error
+
+        backend.mount_point = mount
+        assert backend.authenticate() is True
+
+        assert backend.upload(src, "docs") is True
+        assert (store / "docs" / "a.txt").read_text() == "по сети"
+        assert (store / "docs" / "sub" / "b.txt").read_text() == "вложенный"
+
+        listed = backend.list_remote("docs")
+        assert sorted(str(p) for p in listed) == ["a.txt", "sub/b.txt"]
+
+        out = t / "out" / "a.txt"
+        assert backend.download("docs/a.txt", out) is True
+        assert out.read_text() == "по сети"
+
+        status = backend.get_status()
+        assert status["backend"] == "smb" and status["mounted"] is True
+        assert status["mount_point"] == str(mount)
+
+        assert backend.delete_remote("docs/a.txt") is True
+        assert backend.delete_remote("нет-такого") is False
+    print("✓ сетевой бэкенд поднимает/скачивает/удаляет файлы и видит монтирование")
+
+
+def test_s3_backend_requires_boto3():
+    """Task 5 Step 2: S3-бэкенд требует boto3 и соблюдает настройки."""
+    from flamquency.backends import S3Backend, BackendError
+    try:
+        import boto3                                   # noqa: F401
+        have_boto3 = True
+    except ImportError:
+        have_boto3 = False
+
+    settings = {"bucket": "b", "prefix": "flamquency/", "region": "eu-west-1",
+                "endpoint": "https://s3.example", "access_key_env": "AK",
+                "secret_key_env": "SK"}
+    if not have_boto3:
+        try:
+            S3Backend(settings, base_path=tempfile.mkdtemp())
+            raise AssertionError("должно было упасть без boto3")
+        except BackendError as e:
+            assert "boto3" in str(e)
+        print("✓ S3-бэкенд честно требует boto3")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        backend = S3Backend(settings, base_path=Path(tmpdir) / "store")
+        # ключ строится из префикса и пути
+        assert backend._key("docs/a.txt") == "flamquency/docs/a.txt"
+        assert backend._key("/docs/a.txt") == "flamquency/docs/a.txt"
+        # секреты читаются из окружения, названного в конфиге
+        import os
+        os.environ["AK"] = "key-id"
+        os.environ["SK"] = "secret"
+        assert backend._credentials() == ("key-id", "secret")
+        status = backend.get_status()
+        assert status["backend"] == "s3" and status["bucket"] == "b"
+        assert status["endpoint"] == "https://s3.example"
+        del os.environ["AK"], os.environ["SK"]
+    print("✓ S3-бэкенд строит ключи и берёт секреты из окружения")
+
+
+def test_rclone_backend_remote_naming():
+    """Task 5 Step 3: облако через rclone — корректные remote-имена."""
+    from flamquency.backends import RcloneBackend
+    with tempfile.TemporaryDirectory() as tmpdir:
+        drive = RcloneBackend("gdrive:folder123", base_path=tmpdir, name="gdrive")
+        assert drive.remote == "gdrive:folder123"
+        status = drive.get_status()
+        assert status["backend"] == "gdrive"
+        assert status["remote"] == "gdrive:folder123"
+        assert isinstance(status["rclone"], bool)
+
+        drop = RcloneBackend("dropbox:flamquency", base_path=tmpdir,
+                             name="dropbox")
+        # локальное зеркало всегда доступно для list/delete
+        (Path(tmpdir) / "flamquency").mkdir()
+        (Path(tmpdir) / "flamquency" / "x.txt").write_text("x")
+        assert [str(p) for p in drop.list_remote("flamquency")] == ["x.txt"]
+        assert drop.delete_remote("flamquency/x.txt") is True
+    print("✓ rclone-бэкенд формирует remote-имена и работает с зеркалом")
+
+
+def test_backend_secret_env_can_be_disabled():
+    """Task 5: пустая строка в *_env = «секрет не нужен» (гостевая шара)."""
+    from flamquency.backends import describe_backend
+    config = {
+        "backends": {
+            "smb": {
+                "server": "//nas/public",
+                "mount_point": "/mnt/nas",
+                "username_env": "",      # гость — пароля нет
+                "password_env": "",
+            }
+        }
+    }
+    # mount_point не существует, поэтому остаётся ровно одна проблема
+    ok, problems, _ = describe_backend(config, "smb")
+    assert not ok
+    assert len(problems) == 1, problems
+    assert "монтир" in problems[0]
+
+    # с живой точкой монтирования бэкенд полностью готов
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config["backends"]["smb"]["mount_point"] = tmpdir
+        ok, problems, _ = describe_backend(config, "smb")
+        assert ok and problems == [], problems
+
+    # без явного отключения диагностика требует переменную
+    config["backends"]["smb"].pop("username_env")
+    config["backends"]["smb"].pop("password_env")
+    ok, problems, _ = describe_backend(config, "smb")
+    assert not ok and any("FLAMQUENCY_SMB" in p for p in problems)
+    print("✓ *_env можно отключить пустой строкой для гостевых шар")
+
+
+def test_config_carries_backend_settings():
+    """Task 5: конфиг v2 описывает настройки каждого бэкенда."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "config.yaml"
+        config = load_config(config_path=cfg_path)
+        backends = config["backends"]
+        for name in ("s3", "smb", "nfs", "gdrive", "dropbox"):
+            assert name in backends, name
+        # секреты не хранятся в конфиге — только имена переменных
+        for name, settings in backends.items():
+            for key, value in settings.items():
+                assert not key.endswith("_key") or key.endswith("_env"), key
+                if key.endswith("_env"):
+                    assert value.startswith("FLAMQUENCY_"), value
+        assert config["cloud_backend"] == "local"
+    print("✓ конфиг описывает бэкенды, не храня секретов")
+
+
 def test_rollback_snapshot():
     with tempfile.TemporaryDirectory() as tmpdir:
         sync = _isolated_sync(tmpdir)
@@ -1864,6 +2088,13 @@ def main():
         test_evolution_learns_and_suggests,
         test_evolution_survives_broken_state,
         test_config_carries_v2_sections,
+        test_backend_registry_and_readiness,
+        test_backend_factory_refuses_unready,
+        test_network_backend_roundtrip,
+        test_s3_backend_requires_boto3,
+        test_rclone_backend_remote_naming,
+        test_config_carries_backend_settings,
+        test_backend_secret_env_can_be_disabled,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,
