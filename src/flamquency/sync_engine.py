@@ -7,6 +7,10 @@ from pathlib import Path
 from datetime import datetime
 from flamquency.version_store import VersionStore, BlobStore
 from flamquency.cloud import LocalBackend
+from flamquency.encryption import (
+    EncryptionManager, EncryptionError, WrongPasswordError,
+    EncryptionLockedError, DecryptionError,
+)
 
 class SyncResult:
     def __init__(self):
@@ -20,17 +24,54 @@ class SyncResult:
 
 class FlamQuencySync:
     """Main synchronization engine."""
-    
-    def __init__(self, config=None, backend=None):
+
+    def __init__(self, config=None, backend=None, password=None, base_dir=None):
         self.config = config or {}
         self.backend = backend or LocalBackend()
-        self.base_dir = Path.home() / ".flamquency"
+        self.base_dir = Path(base_dir) if base_dir else Path.home() / ".flamquency"
         self.snapshot_dir = self.base_dir / "snapshots"
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        self.version_store = VersionStore(self.base_dir / "versions")
+        self.encryption = self._setup_encryption(password)
+        self.version_store = VersionStore(
+            self.base_dir / "versions", encryption=self.encryption
+        )
         self.version_dir = self.base_dir / "versions" / "files"
         self.version_dir.mkdir(parents=True, exist_ok=True)
+
+    def _setup_encryption(self, password):
+        """Build the encryption manager for the version store.
+
+        - encryption disabled in config  → None (plain store)
+        - enabled + password + no key yet → enable encryption, create key file
+        - enabled + password + key exists → unlock (raises WrongPasswordError)
+        - enabled + no password           → locked manager (reads/writes fail)
+        """
+        enc_cfg = self.config.get("encryption") or {}
+        if not enc_cfg.get("enabled"):
+            return None
+
+        store_dir = self.base_dir / "versions"
+        manager = EncryptionManager(store_dir)
+        if manager.is_configured:
+            if password is None:
+                return manager  # locked — operations will raise until unlocked
+            manager.unlock(password)  # raises WrongPasswordError on mismatch
+            return manager
+        if password is None:
+            raise EncryptionError(
+                "Encryption is enabled but no password was provided"
+            )
+        return EncryptionManager.enable(store_dir, password)
     
+    def _require_unlocked(self):
+        """Encrypted stores must refuse to run while locked — never silently skip."""
+        if self.encryption is not None and self.encryption.is_configured:
+            if not self.encryption.is_unlocked:
+                raise EncryptionLockedError(
+                    "Blob store is encrypted but locked — "
+                    "provide the password (--password / FLAMQUENCY_PASSWORD)"
+                )
+
     def scan_directory(self, path, exclude_patterns=None, max_files=10000):
         if exclude_patterns is None:
             exclude_patterns = self.config.get("exclude_patterns", [])
@@ -68,6 +109,7 @@ class FlamQuencySync:
         return self.version_store.blob_store.store_file(filepath)
     
     def create_snapshot(self, name=None, source_path=None, max_files=1000):
+        self._require_unlocked()
         if name is None:
             name = f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
@@ -103,6 +145,7 @@ class FlamQuencySync:
         return snapshot_path, metadata
     
     def sync(self, source=None, destination=None, max_files=10000):
+        self._require_unlocked()
         if source is None:
             source = Path.home() / ".flamquency"
         if destination is None:
@@ -144,7 +187,9 @@ class FlamQuencySync:
         self.config["last_sync"] = datetime.now().isoformat()
         
         from flamquency.config import save_config
-        save_config(self.config)
+        # Save into this engine's base dir (== ~/.flamquency by default),
+        # so isolated instances never touch the real user config.
+        save_config(self.config, config_path=self.base_dir / "config.yaml")
         
         result.timestamp = datetime.now().isoformat()
         return result
@@ -258,6 +303,12 @@ class FlamQuencySync:
     def status(self):
         backend_status = self.backend.get_status()
         vs_stats = self.version_store.stats()
+        if self.encryption is None:
+            enc_state = "disabled"
+        elif self.encryption.is_unlocked:
+            enc_state = "enabled"
+        else:
+            enc_state = "locked"
         return {
             "last_sync": self.config.get("last_sync"),
             "backend": backend_status.get("backend", "local"),
@@ -265,4 +316,6 @@ class FlamQuencySync:
             "tracked_files": vs_stats.get("tracked_files", 0),
             "blob_count": vs_stats.get("blob_count", 0),
             "storage_bytes": vs_stats.get("stored_bytes", 0),
+            "encryption": enc_state,
+            "encrypted_blobs": vs_stats.get("encrypted_blobs", 0),
         }

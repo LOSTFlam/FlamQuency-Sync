@@ -27,13 +27,17 @@ class StatusBar(Static):
         last = status.get("last_sync", "Never")
         if last and last != "None":
             last = last[:19].replace("T", " ")
-        
+
         storage_mb = status.get("storage_bytes", 0) / (1024 * 1024)
-        
+
+        enc = status.get("encryption", "disabled")
+        enc_icons = {"enabled": "🔒", "locked": "🔐", "disabled": "🔓"}
+
         yield Static(
             f"  Backend: {status.get('backend', 'local')}  |  "
             f"Tracked: {status.get('tracked_files', 0)} files  |  "
             f"Storage: {storage_mb:.1f} MB  |  "
+            f"Enc: {enc_icons.get(enc, '🔓')} {enc}  |  "
             f"Last sync: {last}",
             classes="status-text",
         )
@@ -307,6 +311,10 @@ class SettingsScreen(Screen):
                 Static("[bold]Auto Sync[/bold]"),
                 Static(f"Enabled: {config.get('auto_sync', False)}"),
                 Static(f"Interval: {config.get('sync_interval_hours', 24)}h"),
+                Static(""),
+                Static("[bold]Encryption[/bold]"),
+                Static(f"Enabled: {(config.get('encryption') or {}).get('enabled', False)}"),
+                Static("[dim]Manage with: flamquency encryption status|enable|disable[/dim]"),
                 Static(""),
                 Static("[dim]Edit ~/.flamquency/config.yaml for advanced settings[/dim]"),
             ),

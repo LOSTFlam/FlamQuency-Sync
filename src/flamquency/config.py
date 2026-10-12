@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
         "**/.flamquency/snapshots/**",
         "**/.flamquency/versions/**",
         "**/.flamquency/data/**",
+        "**/.flamquency/encryption.json",  # never sync the encryption key file
         # Common noise
         "**/.cache/**",
         "**/*.tmp",
@@ -30,6 +31,9 @@ DEFAULT_CONFIG = {
     "auto_sync": False,
     "sync_interval_hours": 24,
     "last_sync": None,
+    "encryption": {
+        "enabled": False,  # Fernet/AES encryption of stored blobs
+    },
     "ui": {
         "theme": "default",
         "color_accent": "cyan",
@@ -55,10 +59,13 @@ def load_config():
         save_config(config)
     return config
 
-def save_config(config):
+def save_config(config, config_path=None):
     """Save configuration to disk."""
-    XDG_HOME.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, 'w') as f:
+    if config_path is None:
+        config_path = CONFIG_PATH
+    config_path = Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
 def merge_configs(default, user):

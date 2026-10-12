@@ -14,6 +14,7 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Watch mode** — auto-sync on file changes
 - **Compression** — zlib compression with deduplication
 - **Diff** — compare text file versions
+- **Encryption** — optional Fernet (AES-128) encryption of stored blobs with your password
 
 ## Installation
 
@@ -67,7 +68,54 @@ flamquency watch ~/Documents ~/Pictures
 # Config
 flamquency config
 flamquency config --edit
+
+# Encryption (blob store at rest)
+flamquency encryption status
+flamquency encryption enable            # asks for a password interactively
+flamquency encryption disable
+flamquency encryption change-password
 ```
+
+The password can also come from the `FLAMQUENCY_PASSWORD` environment
+variable or the `--password/-p` flag, which is handy for scripts:
+
+```bash
+FLAMQUENCY_PASSWORD='my secret' flamquency sync --source ~/Documents
+```
+
+## Encryption
+
+Blobs (the actual file contents in `~/.flamquency/versions/blobs/`) can be
+encrypted at rest with Fernet — AES-128-CBC with HMAC-SHA256 authentication.
+
+- **Key derivation**: PBKDF2-HMAC-SHA256, 480 000 iterations, random 16-byte salt
+- **Key file**: `~/.flamquency/versions/encryption.json` (mode `0600`) — stores
+  only the salt, iteration count and a verifier token. The password itself and
+  the derived key are never written to disk
+- **Per-blob flag**: the blob index records whether each blob is encrypted, so
+  a store that was plaintext before encryption keeps working, and disabling
+  encryption decrypts existing blobs in place
+- **Locked store**: while locked, sync and snapshots refuse to run instead of
+  silently writing plaintext — you always know your data is protected
+- **Password change**: re-encrypts every existing blob under the new key
+
+```bash
+# Enable, then sync as usual
+flamquency encryption enable
+flamquency sync
+
+# Later runs need the password (flag, env var, or interactive prompt)
+flamquency sync --password 'my secret'
+
+# Rotate the password (re-encrypts all blobs)
+flamquency encryption change-password --new-password 'new secret'
+
+# Turn it off (decrypts everything in place)
+flamquency encryption disable
+```
+
+> ⚠️ Without the password the encrypted blobs are unrecoverable — there is no
+> backdoor. Keep a backup of `~/.flamquency/` somewhere safe.
 
 ## Configuration
 
@@ -104,6 +152,7 @@ The backend will:
 flamquency/
 ├── sync_engine.py       # Core sync engine
 ├── version_store.py     # Content-addressable blob storage
+├── encryption.py        # Fernet/AES blob encryption
 ├── github_backend.py    # GitHub cloud backend
 ├── cloud.py             # Backend abstraction
 ├── config.py            # YAML configuration
@@ -121,7 +170,8 @@ flamquency/
 ├── snapshots/           # System snapshots (manifests)
 ├── versions/
 │   ├── blobs/           # Compressed file contents (SHA256)
-│   └── files/           # Per-file version histories
+│   ├── files/           # Per-file version histories
+│   └── encryption.json  # Encryption key file (only when enabled)
 └── github-clone/        # GitHub repo clone (if using GitHub backend)
 ```
 

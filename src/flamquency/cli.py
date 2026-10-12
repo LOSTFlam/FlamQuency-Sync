@@ -12,13 +12,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from flamquency.sync_engine import FlamQuencySync
 from flamquency.config import load_config, save_config
 from flamquency.cloud import get_backend, LocalBackend
+from flamquency.encryption import (
+    EncryptionManager, EncryptionError, WrongPasswordError,
+    EncryptionLockedError, DecryptionError,
+)
+
+ENV_PASSWORD = "FLAMQUENCY_PASSWORD"
 
 
-def get_sync_engine(config=None):
+def resolve_password(args_password=None):
+    """Get the encryption password: CLI flag → env var → interactive prompt."""
+    if args_password:
+        return args_password
+    import os
+    env_pw = os.environ.get(ENV_PASSWORD)
+    if env_pw:
+        return env_pw
+    try:
+        import getpass
+        pw = getpass.getpass("🔐 Blob store password: ")
+        if pw:
+            return pw
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return None
+
+
+def get_sync_engine(config=None, password=None):
     """Initialize sync engine with configured backend."""
     if config is None:
         config = load_config()
-    
+
     backend_type = config.get("cloud_backend", "local")
     if backend_type == "local":
         backend = LocalBackend()
@@ -28,23 +52,37 @@ def get_sync_engine(config=None):
                              token=config.get("github_token"))
     else:
         backend = LocalBackend()
-    
+
     backend.authenticate()
-    return FlamQuencySync(config=config, backend=backend)
+    if password is None and (config.get("encryption") or {}).get("enabled"):
+        # Only ask for a password when the store is actually encrypted
+        password = resolve_password(None)
+    return FlamQuencySync(config=config, backend=backend, password=password)
 
 
 def cmd_sync(args):
     """Execute synchronization."""
-    sync = get_sync_engine()
-    
+    try:
+        sync = get_sync_engine(password=getattr(args, "password", None))
+    except (WrongPasswordError, EncryptionError) as e:
+        print(f"🔐 {e}")
+        return 1
+
     source = Path(args.source) if args.source else None
     print(f"🔥 Starting sync...")
     if source:
         print(f"   Source: {source}")
     else:
         print(f"   Source: ~/.flamquency (default)")
-    
-    result = sync.sync(source=source)
+
+    try:
+        result = sync.sync(source=source)
+    except EncryptionLockedError as e:
+        print(f"🔐 {e}")
+        return 1
+    except DecryptionError as e:
+        print(f"🔐 {e}")
+        return 1
     
     print(f"\n✅ Sync complete!")
     print(f"   Files synced:   {result.files_synced}")
@@ -98,8 +136,12 @@ def cmd_rollback(args):
 
 def cmd_rollback_file(args):
     """Rollback specific file."""
-    sync = get_sync_engine()
-    
+    try:
+        sync = get_sync_engine(password=getattr(args, "password", None))
+    except (WrongPasswordError, EncryptionError) as e:
+        print(f"🔐 {e}")
+        return 1
+
     filepath = Path(args.file).expanduser()
     
     if args.list:
@@ -143,11 +185,16 @@ def cmd_status(args):
     print(f"   Blobs:        {status.get('blob_count', 0)}")
     storage_mb = status.get("storage_bytes", 0) / (1024 * 1024)
     print(f"   Storage:      {storage_mb:.2f} MB")
-    
+
+    # Encryption
+    enc = status.get("encryption", "disabled")
+    enc_icons = {"enabled": "🔒", "locked": "🔐", "disabled": "🔓"}
+    print(f"   Encryption:   {enc_icons.get(enc, '🔓')} {enc}")
+
     # Snapshots
     snapshots = sync.list_snapshots()
     print(f"   Snapshots:    {len(snapshots)}")
-    
+
     return 0
 
 
@@ -238,6 +285,95 @@ def cmd_watch(args):
     return 0
 
 
+def cmd_encryption(args):
+    """Manage blob encryption: status / enable / disable / change-password."""
+    config = load_config()
+    action = args.action
+    store_dir = Path.home() / ".flamquency" / "versions"
+
+    if action == "status":
+        mgr = EncryptionManager(store_dir)
+        if not mgr.is_configured:
+            print("🔓 Encryption: DISABLED (blobs stored in plaintext)")
+        elif mgr.is_unlocked:
+            print("🔒 Encryption: ENABLED and UNLOCKED")
+        else:
+            print("🔒 Encryption: ENABLED but LOCKED (password required)")
+        print(f"   Key file: {mgr.key_path}")
+        return 0
+
+    if action == "enable":
+        mgr = EncryptionManager(store_dir)
+        if mgr.is_configured:
+            print("❌ Encryption is already enabled")
+            return 1
+        password = resolve_password(args.password)
+        if not password:
+            print("❌ A password is required to enable encryption")
+            return 1
+        mgr = EncryptionManager.enable(store_dir, password)
+        config["encryption"] = {"enabled": True}
+        save_config(config)
+        print("🔒 Encryption enabled!")
+        print("   New blobs will be encrypted with AES-128 (Fernet).")
+        print(f"   Key file: {mgr.key_path} (keep it safe — no password, no data)")
+        return 0
+
+    if action == "disable":
+        mgr = EncryptionManager(store_dir)
+        if not mgr.is_configured:
+            print("❌ Encryption is not enabled")
+            return 1
+        password = resolve_password(args.password)
+        if not password:
+            print("❌ A password is required to disable encryption")
+            return 1
+        try:
+            mgr.unlock(password)
+        except WrongPasswordError:
+            print("❌ Wrong password")
+            return 1
+        sync = get_sync_engine(config=config, password=password)
+        decrypted = sync.version_store.blob_store.disable_encryption(mgr)
+        config["encryption"] = {"enabled": False}
+        save_config(config)
+        print(f"🔓 Encryption disabled — {decrypted} blob(s) decrypted in place")
+        return 0
+
+    if action == "change-password":
+        mgr = EncryptionManager(store_dir)
+        if not mgr.is_configured:
+            print("❌ Encryption is not enabled")
+            return 1
+        old_pw = resolve_password(args.password)
+        if not old_pw:
+            print("❌ Current password is required")
+            return 1
+        try:
+            mgr.unlock(old_pw)
+        except WrongPasswordError:
+            print("❌ Wrong password")
+            return 1
+        import getpass
+        new_pw = args.new_password or getpass.getpass("🔐 New password: ")
+        if not new_pw:
+            print("❌ New password must not be empty")
+            return 1
+        if not args.new_password:
+            confirm = getpass.getpass("🔐 Confirm new password: ")
+            if new_pw != confirm:
+                print("❌ Passwords do not match")
+                return 1
+        new_mgr = mgr.change_password(new_pw)
+        sync = get_sync_engine(config=config, password=new_pw)
+        rekeyed = sync.version_store.blob_store.rekey(mgr, new_mgr)
+        print(f"🔑 Password changed — {rekeyed} blob(s) re-encrypted")
+        return 0
+
+    print(f"❌ Unknown encryption action: {action}")
+    return 1
+
+
 def cmd_config(args):
     """Show or edit configuration."""
     config = load_config()
@@ -265,6 +401,7 @@ def main():
     # sync
     p_sync = subparsers.add_parser("sync", help="Synchronize files")
     p_sync.add_argument("--source", "-s", help="Source directory (default: ~/.flamquency)")
+    p_sync.add_argument("--password", "-p", help="Blob store password (else env FLAMQUENCY_PASSWORD)")
     
     # rollback
     p_rb = subparsers.add_parser("rollback", help="Rollback to snapshot")
@@ -296,7 +433,17 @@ def main():
     # config
     p_config = subparsers.add_parser("config", help="Show/edit configuration")
     p_config.add_argument("--edit", "-e", action="store_true", help="Edit config")
-    
+
+    # encryption
+    p_enc = subparsers.add_parser("encryption", help="Manage blob encryption")
+    p_enc.add_argument(
+        "action",
+        choices=["status", "enable", "disable", "change-password"],
+        help="What to do with encryption",
+    )
+    p_enc.add_argument("--password", "-p", help="Password (else env FLAMQUENCY_PASSWORD or prompt)")
+    p_enc.add_argument("--new-password", help="New password for change-password (else prompt)")
+
     args = parser.parse_args()
     
     if not args.command:
@@ -314,6 +461,7 @@ def main():
         "snapshots": cmd_snapshots,
         "watch": cmd_watch,
         "config": cmd_config,
+        "encryption": cmd_encryption,
     }
     
     handler = commands.get(args.command)

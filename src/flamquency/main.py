@@ -8,15 +8,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from flamquency.sync_engine import FlamQuencySync
 from flamquency.config import load_config
 from flamquency.cloud import get_backend, LocalBackend
+from flamquency.cli import resolve_password
 
 
 def main():
     """Launch the Textual TUI."""
     config = load_config()
-    
+
     if "__version__" not in config:
         config["__version__"] = "0.1.0"
-    
+
     backend_type = config.get("cloud_backend", "local")
     if backend_type == "local":
         backend = LocalBackend()
@@ -26,12 +27,17 @@ def main():
                              token=config.get("github_token"))
     else:
         backend = LocalBackend()
-    
+
     if not backend.authenticate():
         print("Warning: Backend authentication may have issues")
-    
-    sync = FlamQuencySync(config=config, backend=backend)
-    
+
+    # Ask for the blob store password only when encryption is enabled
+    password = None
+    if (config.get("encryption") or {}).get("enabled"):
+        password = resolve_password(None)
+
+    sync = FlamQuencySync(config=config, backend=backend, password=password)
+
     # Use Textual TUI
     from flamquency.textual_tui import run_textual_tui
     run_textual_tui(sync)

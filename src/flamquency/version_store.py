@@ -2,7 +2,8 @@
 
 Stores file blobs keyed by SHA256 hash (like git's object store),
 with per-file version histories that reference those blobs.
-Supports zlib compression and deduplication.
+Supports zlib compression, deduplication, and optional password-based
+encryption (Fernet) of the stored blobs.
 """
 import hashlib
 import json
@@ -12,14 +13,23 @@ import zlib
 from pathlib import Path
 from datetime import datetime
 
+from flamquency.encryption import EncryptionManager, EncryptionLockedError
+
 
 class BlobStore:
-    """Content-addressable blob storage with compression and dedup."""
+    """Content-addressable blob storage with compression, dedup and encryption.
 
-    def __init__(self, base_path):
+    When an :class:`EncryptionManager` is supplied and configured, every blob
+    is compressed (optional) and then encrypted before hitting the disk. The
+    blob index records per-blob whether it is encrypted, so a store that was
+    plaintext before encryption was enabled keeps working.
+    """
+
+    def __init__(self, base_path, encryption=None):
         self.base_path = Path(base_path)
         self.blobs_dir = self.base_path / "blobs"
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
+        self.encryption = encryption
         self._index_path = self.base_path / "blob_index.json"
         self._index = self._load_index()
 
@@ -38,6 +48,31 @@ class BlobStore:
         # Two-level fan-out like git: ab/cdef123...
         return self.blobs_dir / hash_hex[:2] / hash_hex[2:]
 
+    def _require_writable_key(self):
+        """Encrypted stores must never accept plaintext writes while locked."""
+        if self.encryption is not None and self.encryption.is_configured:
+            if not self.encryption.is_unlocked:
+                raise EncryptionLockedError(
+                    "Blob store is encrypted but locked — unlock it with the password first"
+                )
+
+    def _encrypt(self, payload):
+        """Encrypt *payload* when the store is encrypted. Returns (bytes, flag)."""
+        if self.encryption is not None and self.encryption.is_configured:
+            self._require_writable_key()
+            return self.encryption.encrypt(payload), True
+        return payload, False
+
+    def _decrypt(self, raw, entry):
+        """Decrypt *raw* when the blob was stored encrypted."""
+        if not entry.get("encrypted"):
+            return raw
+        if self.encryption is None:
+            raise EncryptionLockedError(
+                "Blob is encrypted but no encryption manager is available"
+            )
+        return self.encryption.decrypt(raw)
+
     def store(self, data, compress=True):
         """Store data, return its SHA256 hex digest. Deduplicates."""
         if isinstance(data, str):
@@ -50,14 +85,14 @@ class BlobStore:
         blob_path = self._blob_path(hash_hex)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if compress:
-            blob_path.write_bytes(zlib.compress(data, level=6))
-        else:
-            blob_path.write_bytes(data)
+        payload = zlib.compress(data, level=6) if compress else data
+        payload, encrypted = self._encrypt(payload)
+        blob_path.write_bytes(payload)
 
         self._index[hash_hex] = {
             "size": len(data),
             "compressed": compress,
+            "encrypted": encrypted,
             "stored_at": datetime.now().isoformat(),
         }
         self._save_index()
@@ -80,7 +115,13 @@ class BlobStore:
         blob_path = self._blob_path(hash_hex)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if compress:
+        if self.encryption is not None and self.encryption.is_configured:
+            # Fernet works on whole messages — read, compress, encrypt, write.
+            data = filepath.read_bytes()
+            payload = zlib.compress(data, level=6) if compress else data
+            payload, encrypted = self._encrypt(payload)
+            blob_path.write_bytes(payload)
+        elif compress:
             # Stream-compress to temp then move
             tmp = blob_path.with_suffix(".tmp")
             compressor = zlib.compressobj(level=6)
@@ -89,12 +130,15 @@ class BlobStore:
                     fout.write(compressor.compress(chunk))
                 fout.write(compressor.flush())
             tmp.rename(blob_path)
+            encrypted = False
         else:
             shutil.copy2(filepath, blob_path)
+            encrypted = False
 
         self._index[hash_hex] = {
             "size": size,
             "compressed": compress,
+            "encrypted": encrypted,
             "stored_at": datetime.now().isoformat(),
         }
         self._save_index()
@@ -106,6 +150,7 @@ class BlobStore:
         if not blob_path.exists():
             return None
         raw = blob_path.read_bytes()
+        raw = self._decrypt(raw, self._index.get(hash_hex, {}))
         if self._index.get(hash_hex, {}).get("compressed", True):
             return zlib.decompress(raw)
         return raw
@@ -117,7 +162,17 @@ class BlobStore:
             return False
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._index.get(hash_hex, {}).get("compressed", True):
+        entry = self._index.get(hash_hex, {})
+
+        if entry.get("encrypted"):
+            # Decrypt in memory, then write out (streaming cipher not possible).
+            data = self.retrieve(hash_hex)
+            if data is None:
+                return False
+            dest_path.write_bytes(data)
+            return True
+
+        if entry.get("compressed", True):
             decompressor = zlib.decompressobj()
             with open(blob_path, "rb") as fin, open(dest_path, "wb") as fout:
                 for chunk in iter(lambda: fin.read(1024 * 1024), b""):
@@ -126,6 +181,40 @@ class BlobStore:
         else:
             shutil.copy2(blob_path, dest_path)
         return True
+
+    def rekey(self, old_manager, new_manager):
+        """Re-encrypt every encrypted blob from *old_manager* to *new_manager*."""
+        rekeyed = 0
+        for hash_hex in list(self._index.keys()):
+            entry = self._index[hash_hex]
+            if not entry.get("encrypted"):
+                continue
+            blob_path = self._blob_path(hash_hex)
+            if not blob_path.exists():
+                continue
+            plain = old_manager.decrypt(blob_path.read_bytes())
+            blob_path.write_bytes(new_manager.encrypt(plain))
+            rekeyed += 1
+        self._save_index()
+        return rekeyed
+
+    def disable_encryption(self, manager):
+        """Decrypt every encrypted blob in place and drop the key file."""
+        decrypted = 0
+        for hash_hex in list(self._index.keys()):
+            entry = self._index[hash_hex]
+            if not entry.get("encrypted"):
+                continue
+            blob_path = self._blob_path(hash_hex)
+            if not blob_path.exists():
+                continue
+            plain = manager.decrypt(blob_path.read_bytes())
+            blob_path.write_bytes(plain)
+            entry["encrypted"] = False
+            decrypted += 1
+        self._save_index()
+        manager.disable()
+        return decrypted
 
     def has(self, hash_hex):
         return hash_hex in self._index
@@ -137,22 +226,27 @@ class BlobStore:
             for h in self._index
             if self._blob_path(h).exists()
         )
+        encrypted_count = sum(
+            1 for b in self._index.values() if b.get("encrypted")
+        )
         return {
             "blob_count": len(self._index),
             "uncompressed_bytes": total_size,
             "stored_bytes": stored_size,
             "ratio": round(total_size / stored_size, 2) if stored_size > 0 else 0,
+            "encrypted_blobs": encrypted_count,
         }
 
 
 class VersionStore:
     """Per-file version history referencing blobs in the BlobStore."""
 
-    def __init__(self, base_path):
+    def __init__(self, base_path, encryption=None):
         self.base_path = Path(base_path)
         self.versions_dir = self.base_path / "files"
         self.versions_dir.mkdir(parents=True, exist_ok=True)
-        self.blob_store = BlobStore(base_path)
+        self.blob_store = BlobStore(base_path, encryption=encryption)
+        self.encryption = encryption
 
     def _version_path(self, rel_path):
         # Sanitize rel_path for filesystem — replace / with __
