@@ -33,6 +33,9 @@ sha256sums=('SKIP')
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
+    # Ensure deterministic build: no stale bytecode from previous runs
+    find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+    find . -name '*.py[co]' -delete 2>/dev/null || true
     python -m build --wheel --no-isolation
 }
 
