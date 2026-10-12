@@ -16,6 +16,7 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Diff** — compare text file versions
 - **Encryption** — optional Fernet (AES-128) encryption of stored blobs with your password
 - **.flamquencyignore** — gitignore-style rules so you decide exactly what never gets synced
+- **Sync profiles** — named sets of paths for different scenarios, switchable in one command
 
 ## Installation
 
@@ -161,6 +162,54 @@ flamquency ignore --check design.psd  # which rule decides for this path?
 mechanism with `use_ignore_file: false` in the config, or point it elsewhere
 with `ignore_file_path: /path/to/file`.
 
+## Sync profiles
+
+One install, several scenarios. A **profile** is a named set of paths (plus
+optional extra excludes and a description). `flamquency sync` follows the
+*active* profile — no more one-giant-tree syncs when you only meant to back
+up your documents.
+
+```bash
+# Create a profile with several paths at once
+flamquency profile create work \
+    --path ~/projects/work \
+    --path ~/Documents \
+    --description "Work files" \
+    --exclude "*.secret"
+
+flamquency profile use work        # make it the active one
+flamquency sync                    # syncs every path of the active profile
+
+flamquency profile add-path work ~/notes     # grow it later
+flamquency profile remove-path work ~/notes  # shrink it back
+flamquency profile list             # → shows every profile and the active one
+flamquency profile show work        # one profile in detail
+flamquency profile delete old       # remove one (active/default are protected)
+
+# One-off run of another profile — the active profile stays untouched
+flamquency sync --profile media
+
+# An explicit source still bypasses profiles entirely (classic single-root sync)
+flamquency sync --source ~/some/dir
+```
+
+How a profile sync behaves:
+
+- **Each path is synced in turn** into `~/.flamquency/sync/<label>/`, where
+  the label is the path's basename — two roots with identically named files
+  never clobber each other
+- **Version histories are keyed per root** (`docs/todo.md` vs
+  `code/todo.md`), so per-file rollback stays exact
+- **One snapshot per synced path**, named after the root — rollbacks stay
+  readable
+- **Missing paths are reported, never silently skipped** — the error list
+  in the sync summary names them
+- **Profile excludes stack on top of the config defaults** — `*.secret` from
+  the profile and `*.log` from the config both apply
+- **`default` is structural** — it points at `~/.flamquency` (the historical
+  sync root), so an upgraded config keeps working with zero changes; it
+  cannot be deleted, and neither can the profile you're currently using
+
 ## Configuration
 
 Config stored in `~/.flamquency/config.yaml`:
@@ -198,6 +247,7 @@ flamquency/
 ├── version_store.py     # Content-addressable blob storage
 ├── encryption.py        # Fernet/AES blob encryption
 ├── ignore.py            # .flamquencyignore (gitignore-style rules)
+├── profiles.py          # Sync profiles (named sets of paths)
 ├── github_backend.py    # GitHub cloud backend
 ├── cloud.py             # Backend abstraction
 ├── config.py            # YAML configuration

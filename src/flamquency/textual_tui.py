@@ -38,6 +38,8 @@ class StatusBar(Static):
             f"Tracked: {status.get('tracked_files', 0)} files  |  "
             f"Storage: {storage_mb:.1f} MB  |  "
             f"Enc: {enc_icons.get(enc, '🔓')} {enc}  |  "
+            f"Profile: {status.get('active_profile', 'default')} "
+            f"({status.get('profile_count', 1)})  |  "
             f"Last sync: {last}",
             classes="status-text",
         )

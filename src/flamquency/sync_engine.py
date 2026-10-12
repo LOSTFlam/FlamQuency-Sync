@@ -33,6 +33,8 @@ class SyncResult:
         self.snapshot_created = False
         self.timestamp = datetime.now().isoformat()
         self.blobs_stored = 0
+        self.profile = None    # profile name when this run followed one
+        self.paths = []        # per-root breakdown: {"path", "label", "files_synced"}
 
 class FlamQuencySync:
     """Main synchronization engine."""
@@ -195,7 +197,8 @@ class FlamQuencySync:
     def compute_hash(self, filepath):
         return self.version_store.blob_store.store_file(filepath)
     
-    def create_snapshot(self, name=None, source_path=None, max_files=1000):
+    def create_snapshot(self, name=None, source_path=None, max_files=1000,
+                        exclude_patterns=None):
         self._require_unlocked()
         if name is None:
             name = f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -206,7 +209,6 @@ class FlamQuencySync:
         if source_path is None:
             source_path = Path.home() / ".flamquency"
         
-        excluded = self.config.get("exclude_patterns", [])
         manifest = {}
         
         count = 0
@@ -214,7 +216,8 @@ class FlamQuencySync:
             if count >= max_files:
                 break
             if item.is_file() and not self._ignore_decision(
-                    item, source_path, is_dir=False):
+                    item, source_path, is_dir=False,
+                    patterns=exclude_patterns):
                 rel = str(item.relative_to(source_path))
                 file_hash = self.version_store.blob_store.store_file(item)
                 manifest[rel] = file_hash
@@ -232,52 +235,154 @@ class FlamQuencySync:
         self.snapshot_created = True
         return snapshot_path, metadata
     
-    def sync(self, source=None, destination=None, max_files=10000):
-        self._require_unlocked()
-        if source is None:
-            source = Path.home() / ".flamquency"
-        if destination is None:
-            destination = self.backend.base_path
-        
+    def _unique_snapshot_name(self, name):
+        """Never clobber an existing snapshot — suffix _2, _3, ... if taken."""
+        candidate = name
+        counter = 2
+        while (self.snapshot_dir / candidate).exists():
+            candidate = f"{name}_{counter}"
+            counter += 1
+        return candidate
+
+    def _root_label(self, path, taken):
+        """Stable destination subdirectory name for one sync root."""
+        label = Path(path).name or "root"
+        label = label.strip()
+        if not label:
+            label = "root"
+        # two roots with the same basename must not land in one bucket
+        base = label
+        counter = 2
+        while label in taken:
+            label = f"{base}_{counter}"
+            counter += 1
+        taken.add(label)
+        return label
+
+    def _sync_root(self, source, destination, label, max_files=10000,
+                   exclude_patterns=None):
+        """Sync one root into `destination/label`, tracking versions as `label/rel`.
+
+        Returns a SyncResult for this root alone; sync() aggregates the
+        per-root results.
+        """
         source = Path(source)
         destination = Path(destination)
-        destination.mkdir(parents=True, exist_ok=True)
-        
+
         source_files, excluded_count = self._scan_with_stats(
-            source, max_files=max_files
+            source, exclude_patterns=exclude_patterns, max_files=max_files
         )
-        
+
         result = SyncResult()
         result.files_excluded = excluded_count
-        
+
         for src_file in source_files:
             rel = src_file.relative_to(source)
-            dest_file = destination / rel
-            
+            # Label-prefixed keys keep version histories separate per root,
+            # so two roots with an identically named file never collide.
+            store_key = f"{label}/{rel.as_posix()}" if label else rel.as_posix()
+            dest_file = destination / label / rel if label else destination / rel
+
             dest_file.parent.mkdir(parents=True, exist_ok=True)
-            
+
             try:
                 if src_file.is_file():
                     hash_hex, is_new = self.version_store.record_version(
-                        str(rel), filepath=src_file
+                        store_key, filepath=src_file
                     )
                     if is_new:
                         result.blobs_stored += 1
                         result.files_changed += 1
-                    
+
                     dest_file.write_bytes(src_file.read_bytes())
                     result.files_synced += 1
             except Exception as e:
                 result.errors.append(f"{src_file}: {e}")
-        
-        self.create_snapshot(source_path=source, max_files=max_files)
+
+        # One snapshot per synced root — named after the root so rollbacks
+        # stay readable.
+        prefix = f"snapshot_{label}_" if label else "snapshot_"
+        snap_name = self._unique_snapshot_name(
+            f"{prefix}{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        self.create_snapshot(name=snap_name, source_path=source,
+                             max_files=max_files,
+                             exclude_patterns=exclude_patterns)
+        result.snapshot_created = True
+        result.timestamp = datetime.now().isoformat()
+        return result
+
+    def sync(self, source=None, destination=None, max_files=10000,
+             profile=None):
+        """Synchronize files.
+
+        - explicit `source`  → single root, no profile (classic behaviour)
+        - otherwise          → the profile named by `profile`, or the active
+                               one from the config; every path of the profile
+                               is synced in turn
+        """
+        self._require_unlocked()
+
+        if source is not None:
+            # Explicit source wins — plain single-root sync, no profile.
+            if destination is None:
+                destination = self.backend.base_path
+            result = self._sync_root(source, destination, label=None,
+                                     max_files=max_files)
+            self._finish_sync(result)
+            return result
+
+        # Profile-driven sync (explicit --profile or the active profile).
+        from flamquency.profiles import (
+            ProfileError, ensure_profiles, get_profile, active_name,
+            profile_paths, exclude_patterns as profile_excludes,
+        )
+        ensure_profiles(self.config)
+        name = profile if profile is not None else active_name(self.config)
+        prof = get_profile(self.config, name)  # raises ProfileError if unknown
+
+        if destination is None:
+            destination = self.backend.base_path
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+
+        excludes = profile_excludes(self.config, prof)
+        roots = profile_paths(self.config, name)
+
+        combined = SyncResult()
+        combined.profile = name
+        taken_labels = set()
+        for root in roots:
+            if not root.exists():
+                combined.errors.append(f"{root}: path does not exist")
+                continue
+            label = self._root_label(root, taken_labels)
+            result = self._sync_root(root, destination, label,
+                                     max_files=max_files,
+                                     exclude_patterns=excludes)
+            combined.files_synced += result.files_synced
+            combined.files_changed += result.files_changed
+            combined.files_excluded += result.files_excluded
+            combined.blobs_stored += result.blobs_stored
+            combined.errors.extend(result.errors)
+            combined.snapshot_created = combined.snapshot_created or result.snapshot_created
+            combined.paths.append({
+                "path": str(root),
+                "label": label,
+                "files_synced": result.files_synced,
+            })
+
+        self._finish_sync(combined)
+        combined.timestamp = datetime.now().isoformat()
+        return combined
+
+    def _finish_sync(self, result):
+        """Bookkeeping shared by every sync flavour: stamp last_sync, save."""
         self.config["last_sync"] = datetime.now().isoformat()
-        
         from flamquency.config import save_config
         # Save into this engine's base dir (== ~/.flamquency by default),
         # so isolated instances never touch the real user config.
         save_config(self.config, config_path=self.base_dir / "config.yaml")
-        
         result.timestamp = datetime.now().isoformat()
         return result
     
@@ -399,6 +504,8 @@ class FlamQuencySync:
         ignore_file = None
         if self.ignore_rules and self.ignore_rules.path:
             ignore_file = str(self.ignore_rules.path)
+        from flamquency.profiles import ensure_profiles, profile_names, active_name
+        ensure_profiles(self.config)
         return {
             "last_sync": self.config.get("last_sync"),
             "backend": backend_status.get("backend", "local"),
@@ -410,4 +517,7 @@ class FlamQuencySync:
             "encrypted_blobs": vs_stats.get("encrypted_blobs", 0),
             "ignore_rules": len(self.ignore_rules),
             "ignore_file": ignore_file,
+            "active_profile": active_name(self.config),
+            "profiles": profile_names(self.config),
+            "profile_count": len(self.config["profiles"]),
         }

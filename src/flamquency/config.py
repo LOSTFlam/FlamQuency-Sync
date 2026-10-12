@@ -1,4 +1,5 @@
 """Configuration management for FlamQuency-Sync."""
+import copy
 import os
 import yaml
 from pathlib import Path
@@ -33,6 +34,8 @@ DEFAULT_CONFIG = {
     "last_sync": None,
     "use_ignore_file": True,  # honor ~/.flamquencyignore (gitignore-style)
     "ignore_file_path": None,  # custom path; None = ~/.flamquencyignore
+    "active_profile": "default",  # which sync profile `flamquency sync` follows
+    "profiles": {},  # named sets of paths — filled by ensure_profiles()
     "encryption": {
         "enabled": False,  # Fernet/AES encryption of stored blobs
     },
@@ -43,11 +46,18 @@ DEFAULT_CONFIG = {
     },
 }
 
-def load_config():
-    """Load configuration from disk, merging with defaults."""
-    if CONFIG_PATH.exists():
+def load_config(config_path=None):
+    """Load configuration from disk, merging with defaults.
+
+    The result is always a deep copy of the defaults: mutating one loaded
+    config (e.g. adding a profile) must never leak into the next load.
+    """
+    if config_path is None:
+        config_path = CONFIG_PATH
+    config_path = Path(config_path)
+    if config_path.exists():
         try:
-            with open(CONFIG_PATH) as f:
+            with open(config_path) as f:
                 user_config = yaml.safe_load(f)
         except:
             user_config = {}
@@ -58,7 +68,13 @@ def load_config():
         config = merge_configs(DEFAULT_CONFIG, user_config)
     else:
         config = DEFAULT_CONFIG.copy()
-        save_config(config)
+        save_config(config, config_path=config_path)
+    # Deep-copy the defaults so callers can freely mutate the result
+    # without corrupting DEFAULT_CONFIG for the next load.
+    config = copy.deepcopy(config)
+    # A loaded config always carries a usable profiles section.
+    from flamquency.profiles import ensure_profiles
+    ensure_profiles(config)
     return config
 
 def save_config(config, config_path=None):

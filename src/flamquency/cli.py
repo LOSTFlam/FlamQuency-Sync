@@ -16,6 +16,7 @@ from flamquency.encryption import (
     EncryptionManager, EncryptionError, WrongPasswordError,
     EncryptionLockedError, DecryptionError,
 )
+from flamquency.profiles import ProfileError
 
 ENV_PASSWORD = "FLAMQUENCY_PASSWORD"
 
@@ -69,26 +70,41 @@ def cmd_sync(args):
         return 1
 
     source = Path(args.source) if args.source else None
+    profile = getattr(args, "profile", None)
     print(f"🔥 Starting sync...")
+    if profile:
+        print(f"   Profile: {profile}")
     if source:
         print(f"   Source: {source}")
+    elif profile:
+        print("   Paths: from profile")
     else:
-        print(f"   Source: ~/.flamquency (default)")
+        print("   Paths: from active profile (~/.flamquency by default)")
 
     try:
-        result = sync.sync(source=source)
+        result = sync.sync(source=source, profile=profile)
     except EncryptionLockedError as e:
         print(f"🔐 {e}")
         return 1
     except DecryptionError as e:
         print(f"🔐 {e}")
         return 1
-    
+    except ProfileError as e:
+        print(f"❌ {e}")
+        return 1
+
     print(f"\n✅ Sync complete!")
+    if result.profile:
+        print(f"   Profile:      {result.profile}")
     print(f"   Files synced:   {result.files_synced}")
     print(f"   Files changed:  {result.files_changed}")
     print(f"   Files excluded: {result.files_excluded}")
     print(f"   Blobs stored:   {result.blobs_stored}")
+
+    if result.paths:
+        print("\n   Per path:")
+        for entry in result.paths:
+            print(f"      [{entry['label']}] {entry['files_synced']} file(s) — {entry['path']}")
     
     if result.errors:
         print(f"\n⚠️  {len(result.errors)} error(s):")
@@ -200,7 +216,12 @@ def cmd_status(args):
     if ig_file:
         print(f"   Ignore file:  {ig_file} ({status.get('ignore_rules', 0)} rules)")
     else:
-        print("   Ignore file:  ~/.flamquencyignore (not created yet)")
+        print(f"   Ignore file:  ~/.flamquencyignore (not created yet)")
+
+    # Profiles
+    profiles = status.get("profiles", [])
+    active = status.get("active_profile", "default")
+    print(f"   Profile:      {active} ({len(profiles)} total: {', '.join(profiles)})")
 
     return 0
 
@@ -454,6 +475,140 @@ def cmd_ignore(args):
     return 0
 
 
+def cmd_profile(args):
+    """Manage sync profiles — named sets of paths for different scenarios."""
+    from flamquency.profiles import (
+        ProfileError, add_path, active_name, create_profile, delete_profile,
+        ensure_profiles, get_profile, profile_names, remove_path,
+        set_active, set_description,
+    )
+
+    config_path = getattr(args, "config_path", None)
+    config = load_config(config_path)
+    ensure_profiles(config)
+    action = args.action
+
+    def profile_paths_arg():
+        """Paths come either positionally or via repeatable --path."""
+        return list(getattr(args, "paths", None) or []) + \
+               list(getattr(args, "path", None) or [])
+
+    def save():
+        save_config(config, config_path=config_path)
+
+    try:
+        if action == "list":
+            names = profile_names(config)
+            active = active_name(config)
+            print(f"🗂  {len(names)} profile(s):\n")
+            for name in names:
+                prof = config["profiles"][name]
+                marker = "→" if name == active else " "
+                desc = f"  — {prof.get('description')}" if prof.get("description") else ""
+                print(f" {marker} {name}{desc}")
+                for p in prof["paths"]:
+                    exists = "✓" if Path(p).exists() else "✗"
+                    print(f"      {exists} {p}")
+                extra = prof.get("exclude_patterns") or []
+                if extra:
+                    print(f"      excludes: {', '.join(extra)}")
+            print(f"\n   Active: {active}")
+            print("   Switch with: flamquency profile use NAME")
+            return 0
+
+        if action == "create":
+            name = args.name
+            paths = profile_paths_arg()
+            if not paths:
+                print("❌ At least one path is required to create a profile")
+                return 1
+            prof = create_profile(config, name, paths,
+                                  description=getattr(args, "description", ""),
+                                  exclude_patterns=getattr(args, "exclude", None))
+            save()
+            print(f"🗂  Created profile '{name}' with {len(prof['paths'])} path(s):")
+            for p in prof["paths"]:
+                print(f"      {p}")
+            print(f"\n   Use it: flamquency profile use {name}")
+            return 0
+
+        if action == "delete":
+            name = args.name
+            delete_profile(config, name)
+            save()
+            print(f"🗑  Deleted profile '{name}'")
+            return 0
+
+        if action == "use":
+            name = args.name
+            set_active(config, name)
+            save()
+            print(f"✅ Active profile: {name}")
+            print("   `flamquency sync` now follows this profile")
+            return 0
+
+        if action == "add-path":
+            name = args.name
+            paths = profile_paths_arg()
+            if not paths:
+                print("❌ At least one path is required")
+                return 1
+            for p in paths:
+                add_path(config, name, p)
+            save()
+            prof = get_profile(config, name)
+            print(f"➕ Profile '{name}' now has {len(prof['paths'])} path(s):")
+            for p in prof["paths"]:
+                print(f"      {p}")
+            return 0
+
+        if action == "remove-path":
+            name = args.name
+            paths = profile_paths_arg()
+            if not paths:
+                print("❌ At least one path is required")
+                return 1
+            for p in paths:
+                remove_path(config, name, p)
+            save()
+            prof = get_profile(config, name)
+            print(f"➖ Profile '{name}' now has {len(prof['paths'])} path(s):")
+            for p in prof["paths"]:
+                print(f"      {p}")
+            return 0
+
+        if action == "show":
+            name = args.name
+            prof = get_profile(config, name)
+            active = active_name(config)
+            marker = " (active)" if name == active else ""
+            print(f"🗂  Profile '{name}'{marker}")
+            if prof.get("description"):
+                print(f"   Description: {prof['description']}")
+            print(f"   Paths ({len(prof['paths'])}):")
+            for p in prof["paths"]:
+                exists = "✓" if Path(p).exists() else "✗ (missing)"
+                print(f"      {exists} {p}")
+            extra = prof.get("exclude_patterns") or []
+            if extra:
+                print(f"   Extra excludes: {', '.join(extra)}")
+            return 0
+
+        if action == "describe":
+            name = args.name
+            set_description(config, name, getattr(args, "description", ""))
+            save()
+            print(f"📝 Profile '{name}' description updated")
+            return 0
+
+        print(f"❌ Unknown profile action: {action}")
+        return 1
+
+    except ProfileError as e:
+        print(f"❌ {e}")
+        return 1
+
+
 def cmd_config(args):
     """Show or edit configuration."""
     config = load_config()
@@ -480,7 +635,9 @@ def main():
     
     # sync
     p_sync = subparsers.add_parser("sync", help="Synchronize files")
-    p_sync.add_argument("--source", "-s", help="Source directory (default: ~/.flamquency)")
+    p_sync.add_argument("--source", "-s", help="Source directory (bypasses profiles)")
+    p_sync.add_argument("--profile", "-P", metavar="NAME",
+                        help="Sync this profile instead of the active one")
     p_sync.add_argument("--password", "-p", help="Blob store password (else env FLAMQUENCY_PASSWORD)")
     
     # rollback
@@ -535,6 +692,29 @@ def main():
     p_ign.add_argument("--check", metavar="PATH", help="Explain whether a path is ignored")
     p_ign.add_argument("--list", "-l", action="store_true", help="List the loaded rules")
 
+    # profile
+    p_prof = subparsers.add_parser(
+        "profile", help="Manage sync profiles (named sets of paths)"
+    )
+    p_prof.add_argument(
+        "action",
+        choices=["list", "create", "delete", "use", "show",
+                 "add-path", "remove-path", "describe"],
+        nargs="?",
+        default="list",
+        help="What to do (default: list)",
+    )
+    p_prof.add_argument("name", nargs="?", help="Profile name")
+    p_prof.add_argument("paths", nargs="*", metavar="PATH",
+                        help="Paths (positional form: remove-path NAME PATH...)")
+    p_prof.add_argument("--path", action="append", default=[], metavar="PATH",
+                        help="Path (repeatable) — used by create/add-path/remove-path")
+    p_prof.add_argument("--description", "-d", default="",
+                        help="Profile description (create / describe)")
+    p_prof.add_argument("--exclude", action="append", default=[],
+                        metavar="PATTERN",
+                        help="Extra exclude pattern for the profile (repeatable)")
+
     args = parser.parse_args()
     
     if not args.command:
@@ -554,6 +734,7 @@ def main():
         "config": cmd_config,
         "encryption": cmd_encryption,
         "ignore": cmd_ignore,
+        "profile": cmd_profile,
     }
     
     handler = commands.get(args.command)

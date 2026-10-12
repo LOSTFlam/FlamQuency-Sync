@@ -781,6 +781,341 @@ def test_cli_ignore_init_and_check():
     print("✓ CLI `flamquency ignore` init/add/check/list works")
 
 
+# ── Sync profiles ─────────────────────────────────────────────
+
+def _profile_engine(tmpdir, **config_overrides):
+    """Isolated engine whose config carries a profiles section."""
+    config = load_config()
+    config = dict(config)
+    config["use_ignore_file"] = False
+    config.update(config_overrides)
+    base = Path(tmpdir) / ".flamquency_isolated"
+    backend = LocalBackend(base_path=base / "sync")
+    return FlamQuencySync(config=config, backend=backend, base_dir=base)
+
+
+def test_config_defaults_not_shared_between_loads():
+    config = load_config()
+    config["profiles"]["leak"] = {"paths": ["/leak"]}
+    config["exclude_patterns"].append("*.leak")
+    fresh = load_config()
+    assert "leak" not in fresh.get("profiles", {})
+    assert "*.leak" not in fresh["exclude_patterns"]
+    print("✓ Config defaults are deep-copied — one load never mutates another")
+
+
+def test_profiles_default_in_config():
+    from flamquency.profiles import DEFAULT_PROFILE_NAME
+    config = load_config()
+    assert DEFAULT_PROFILE_NAME in config.get("profiles", {})
+    assert config.get("active_profile") == DEFAULT_PROFILE_NAME
+    print("✓ Config ships a default sync profile")
+
+
+def test_profile_create_list_and_delete():
+    from flamquency.profiles import (
+        ProfileError, create_profile, delete_profile, get_profile, profile_names,
+    )
+    config = load_config()
+    profile = create_profile(config, "documents",
+                             ["~/Documents", "~/Notes"], description="docs")
+    assert profile["paths"] == [str(Path.home() / "Documents"),
+                                str(Path.home() / "Notes")]
+    assert "documents" in profile_names(config)
+    assert get_profile(config, "documents")["description"] == "docs"
+
+    # duplicate name is refused
+    try:
+        create_profile(config, "documents", ["~/x"])
+        assert False, "duplicate profile should raise ProfileError"
+    except ProfileError:
+        pass
+    # a profile needs at least one path
+    try:
+        create_profile(config, "empty", [])
+        assert False, "empty profile should raise ProfileError"
+    except ProfileError:
+        pass
+    # unknown profile is refused
+    try:
+        get_profile(config, "nope")
+        assert False, "unknown profile should raise ProfileError"
+    except ProfileError:
+        pass
+    # invalid names are refused
+    for bad in ["", "   ", "a/b"]:
+        try:
+            create_profile(config, bad, ["~/x"])
+            assert False, f"invalid name {bad!r} should raise ProfileError"
+        except ProfileError:
+            pass
+
+    delete_profile(config, "documents")
+    assert "documents" not in profile_names(config)
+    # the default profile is structural — it cannot be deleted
+    try:
+        delete_profile(config, "default")
+        assert False, "default profile should not be deletable"
+    except ProfileError:
+        pass
+    print("✓ Profile create/list/delete with validation works")
+
+
+def test_profile_paths_and_active_switching():
+    from flamquency.profiles import (
+        ProfileError, active_name, add_path, create_profile, delete_profile,
+        get_profile, remove_path, set_active,
+    )
+    config = load_config()
+    home = str(Path.home())
+
+    add_path(config, "default", "~/code")
+    assert f"{home}/code" in get_profile(config, "default")["paths"]
+    # adding the same path twice is a no-op (dedupe)
+    add_path(config, "default", "~/code")
+    assert get_profile(config, "default")["paths"].count(f"{home}/code") == 1
+
+    remove_path(config, "default", "~/code")
+    assert f"{home}/code" not in get_profile(config, "default")["paths"]
+    # removing a path the profile does not have
+    try:
+        remove_path(config, "default", "~/nowhere")
+        assert False, "removing an absent path should raise ProfileError"
+    except ProfileError:
+        pass
+    # the last path of a profile cannot be removed
+    try:
+        remove_path(config, "default", "~/.flamquency")
+        assert False, "a profile must keep at least one path"
+    except ProfileError:
+        pass
+
+    create_profile(config, "work", ["~/projects"])
+    set_active(config, "work")
+    assert active_name(config) == "work"
+    # the active profile cannot be deleted
+    try:
+        delete_profile(config, "work")
+        assert False, "deleting the active profile should raise ProfileError"
+    except ProfileError:
+        pass
+    # switching to an unknown profile
+    try:
+        set_active(config, "ghost")
+        assert False, "unknown profile should raise ProfileError"
+    except ProfileError:
+        pass
+    # a dangling active_profile falls back to default
+    config["active_profile"] = "ghost"
+    assert active_name(config) == "default"
+    print("✓ Profile path management and active switching work")
+
+
+def test_profile_exclude_patterns_merge():
+    from flamquency.profiles import create_profile, exclude_patterns, get_profile
+    config = load_config()
+    create_profile(config, "media", ["~/Music"], exclude_patterns=["*.flac"])
+    merged = exclude_patterns(config, get_profile(config, "media"))
+    assert "*.flac" in merged            # profile extras apply
+    assert "**/.git/**" in merged        # config defaults still apply
+    print("✓ Profile exclude patterns merge on top of config defaults")
+
+
+def test_sync_uses_active_profile_paths():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from flamquency.profiles import create_profile, set_active
+        t = Path(tmpdir)
+        docs = t / "docs"; docs.mkdir()
+        (docs / "a.txt").write_text("A")
+        code = t / "code"; code.mkdir()
+        (code / "b.txt").write_text("B")
+
+        config = dict(load_config())
+        config["use_ignore_file"] = False
+        create_profile(config, "multi", [str(docs), str(code)])
+        set_active(config, "multi")
+        base = t / ".flamquency_isolated"
+        sync = FlamQuencySync(config=config,
+                              backend=LocalBackend(base_path=base / "sync"),
+                              base_dir=base)
+
+        result = sync.sync()
+        assert result.profile == "multi"
+        assert result.files_synced == 2, result.files_synced
+        assert len(result.paths) == 2
+        assert not result.errors, result.errors
+
+        # each root lands under its own label — no clobbering between roots
+        dest = sync.backend.base_path
+        assert (dest / "docs" / "a.txt").exists()
+        assert (dest / "code" / "b.txt").exists()
+        # version keys are prefixed per root, so equal relative names never collide
+        assert sync.version_store.get_history("docs/a.txt")
+        assert sync.version_store.get_history("code/b.txt")
+        # one snapshot per synced root
+        assert len(sync.list_snapshots()) == 2
+    print("✓ sync() follows the active profile across all its paths")
+
+
+def test_sync_explicit_source_beats_profile():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from flamquency.profiles import create_profile, set_active
+        t = Path(tmpdir)
+        docs = t / "docs"; docs.mkdir()
+        (docs / "a.txt").write_text("A")
+        other = t / "other"; other.mkdir()
+        (other / "c.txt").write_text("C")
+
+        config = dict(load_config())
+        config["use_ignore_file"] = False
+        create_profile(config, "multi", [str(docs)])
+        set_active(config, "multi")
+        base = t / ".flamquency_isolated"
+        sync = FlamQuencySync(config=config,
+                              backend=LocalBackend(base_path=base / "sync"),
+                              base_dir=base)
+
+        # an explicit --source keeps the old single-root behaviour
+        result = sync.sync(source=other)
+        assert result.profile is None
+        assert result.files_synced == 1
+        dest = sync.backend.base_path
+        assert (dest / "c.txt").exists()          # no label prefix
+        assert not (dest / "other").exists()
+    print("✓ An explicit source overrides the active profile")
+
+
+def test_sync_profile_argument_and_missing_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from flamquency.profiles import create_profile, set_active
+        t = Path(tmpdir)
+        docs = t / "docs"; docs.mkdir()
+        (docs / "a.txt").write_text("A")
+
+        config = dict(load_config())
+        config["use_ignore_file"] = False
+        create_profile(config, "work", [str(docs)])
+        create_profile(config, "broken", [str(t / "ghost")])
+        set_active(config, "work")
+        base = t / ".flamquency_isolated"
+        sync = FlamQuencySync(config=config,
+                              backend=LocalBackend(base_path=base / "sync"),
+                              base_dir=base)
+
+        # --profile syncs that profile even when it is not the active one
+        result = sync.sync(profile="work")
+        assert result.profile == "work"
+        assert result.files_synced == 1
+        # the active profile is untouched by a one-off --profile run
+        assert config["active_profile"] == "work"
+
+        # a nonexistent path is reported, never silently skipped
+        result = sync.sync(profile="broken")
+        assert result.files_synced == 0
+        assert result.errors and "does not exist" in result.errors[0]
+
+        # unknown profile name
+        try:
+            sync.sync(profile="ghost")
+            assert False, "unknown profile should raise ProfileError"
+        except Exception as e:
+            assert "ghost" in str(e)
+    print("✓ sync(profile=...) works and missing paths are reported")
+
+
+def test_status_reports_profiles():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from flamquency.profiles import create_profile, set_active
+        t = Path(tmpdir)
+        docs = t / "docs"; docs.mkdir()
+        config = dict(load_config())
+        config["use_ignore_file"] = False
+        create_profile(config, "multi", [str(docs)])
+        set_active(config, "multi")
+        base = t / ".flamquency_isolated"
+        sync = FlamQuencySync(config=config,
+                              backend=LocalBackend(base_path=base / "sync"),
+                              base_dir=base)
+        status = sync.status()
+        assert status["active_profile"] == "multi"
+        assert "multi" in status["profiles"]
+        assert status["profile_count"] >= 2
+    print("✓ status() reports the active profile and profile list")
+
+
+def test_cli_profile_commands():
+    import io
+    import contextlib
+    from argparse import Namespace
+    from flamquency.cli import cmd_profile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        cfg = t / "config.yaml"
+
+        def run(**kw):
+            args = Namespace(
+                action=kw.pop("action", "list"),
+                name=kw.pop("name", None),
+                path=kw.pop("path", []),
+                description=kw.pop("description", ""),
+                exclude=kw.pop("exclude", []),
+                config_path=str(cfg),
+            )
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_profile(args)
+            return rc, buf.getvalue()
+
+        # list on a fresh config shows the default profile
+        rc, out = run()
+        assert rc == 0
+        assert "default" in out
+
+        # create
+        rc, out = run(action="create", name="docs",
+                      path=[str(t / "Documents")], description="my docs")
+        assert rc == 0
+        # duplicate name is refused
+        rc, out = run(action="create", name="docs", path=[str(t / "x")])
+        assert rc == 1
+        # create without paths is refused
+        rc, out = run(action="create", name="nopaths")
+        assert rc == 1
+
+        # add-path
+        rc, out = run(action="add-path", name="docs", path=[str(t / "Notes")])
+        assert rc == 0
+        # show
+        rc, out = run(action="show", name="docs")
+        assert rc == 0
+        assert "Documents" in out and "Notes" in out
+
+        # use — switching the active profile
+        rc, out = run(action="use", name="docs")
+        assert rc == 0
+        # the active profile cannot be deleted
+        rc, out = run(action="delete", name="docs")
+        assert rc == 1
+        # switch back, then delete succeeds
+        rc, out = run(action="use", name="default")
+        assert rc == 0
+        rc, out = run(action="delete", name="docs")
+        assert rc == 0
+
+        # unknown profile / name errors
+        rc, out = run(action="show", name="ghost")
+        assert rc == 1
+        rc, out = run(action="use", name="ghost")
+        assert rc == 1
+
+        # config on disk reflects the operations
+        config = load_config(cfg)
+        assert "docs" not in config["profiles"]
+        assert config["active_profile"] == "default"
+    print("✓ CLI `flamquency profile` list/create/add-path/show/use/delete works")
+
+
 def main():
     print("🔥 Running FlamQuency-Sync tests...\n")
     
@@ -820,6 +1155,16 @@ def main():
         test_sync_counts_ignored_files,
         test_snapshot_respects_ignore_file,
         test_cli_ignore_init_and_check,
+        test_config_defaults_not_shared_between_loads,
+        test_profiles_default_in_config,
+        test_profile_create_list_and_delete,
+        test_profile_paths_and_active_switching,
+        test_profile_exclude_patterns_merge,
+        test_sync_uses_active_profile_paths,
+        test_sync_explicit_source_beats_profile,
+        test_sync_profile_argument_and_missing_path,
+        test_status_reports_profiles,
+        test_cli_profile_commands,
     ]
     
     passed = 0

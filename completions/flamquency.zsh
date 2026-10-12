@@ -12,6 +12,9 @@ _flamquency() {
         'diff:Diff two versions of a file'
         'watch:Watch mode — auto-sync'
         'config:Show or edit configuration'
+        'encryption:Manage blob encryption'
+        'ignore:Manage .flamquencyignore rules'
+        'profile:Manage sync profiles'
     )
 
     _arguments -C \
@@ -29,6 +32,9 @@ _flamquency() {
                     ;;
                 watch)
                     _directories
+                    ;;
+                profile)
+                    _values 'action' list create delete use show add-path remove-path describe
                     ;;
             esac
             ;;

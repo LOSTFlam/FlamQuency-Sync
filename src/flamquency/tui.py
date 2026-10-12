@@ -38,6 +38,9 @@ class FlamQuencyTUI:
         table.add_row("Stored blobs:", str(status.get("blob_count", 0)))
         storage_mb = status.get("storage_bytes", 0) / (1024*1024)
         table.add_row("Storage:", f"{storage_mb:.2f} MB")
+        active = status.get("active_profile", "default")
+        profiles = status.get("profiles", [])
+        table.add_row("Profile:", f"{active} ({len(profiles)} total)")
         panel = Panel(table, title=" Status ", border_style="green")
         console.print(panel)
     
