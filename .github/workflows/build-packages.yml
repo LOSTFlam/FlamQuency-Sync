@@ -1,0 +1,122 @@
+name: Build Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install base-devel
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel python python-pip python-build python-installer python-setuptools python-wheel
+
+      - name: Build package
+        run: |
+          cd packaging
+          cp PKGBUILD /tmp/
+          cd /tmp
+          sed -i 's|$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v\$pkgver.tar.gz|'"$(pwd)"'|' PKGBUILD
+          makepkg -f --noconfirm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamquency-sync-arch
+          path: /tmp/flamquency-sync-*.pkg.tar.*
+
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-build python3-installer dpkg-dev
+
+      - name: Build wheel
+        run: |
+          pip install build installer
+          python -m build --wheel --no-isolation
+
+      - name: Build .deb
+        run: |
+          bash scripts/build-deb.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamquency-sync-deb
+          path: build-deb/*.deb
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          dnf install -y rpm-build python3-pip python3-build python3-installer git
+
+      - name: Build wheel and install
+        run: |
+          pip install build installer
+          python -m build --wheel --no-isolation
+
+      - name: Build RPM
+        run: |
+          bash scripts/build-rpm.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamquency-sync-rpm
+          path: ~/rpmbuild/RPMS/**/*.rpm
+
+  build-snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        with:
+          path: packaging/snapcraft.yaml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamquency-sync-snap
+          path: '*.snap'
+
+  build-flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-46
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: flamquency-sync.flatpak
+          manifest-path: packaging/com.lostflam.FlamQuencySync.yml
+          cache: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamquency-sync-flatpak
+          path: flamquency-sync.flatpak

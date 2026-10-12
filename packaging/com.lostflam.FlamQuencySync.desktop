@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=FlamQuency-Sync
+GenericName=File Sync
+Comment=Terminal file sync with version control and rollback
+Comment[ru]=Синхронизация файлов с контролем версий и откатом
+Icon=com.lostflam.FlamQuencySync
+Exec=flamquency-tui
+Terminal=true
+Categories=System;Utility;FileTools;
+Keywords=sync;backup;version;rollback;snapshot;
+StartupNotify=false

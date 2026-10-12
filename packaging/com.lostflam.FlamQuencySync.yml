@@ -1,0 +1,28 @@
+app-id: com.lostflam.FlamQuencySync
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: flamquency-tui
+finish-args:
+  - --filesystem=home
+  - --filesystem=/run/media
+  - --share=network
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: python-deps
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=${FLATPAK_DEST} rich PyYAML textual watchdog cryptography
+
+  - name: flamquency-sync
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-deps --prefix=${FLATPAK_DEST} .
+      - install -Dm644 packaging/com.lostflam.FlamQuencySync.desktop
+        ${FLATPAK_DEST}/share/applications/com.lostflam.FlamQuencySync.desktop
+      - install -Dm644 packaging/com.lostflam.FlamQuencySync.metainfo.xml
+        ${FLATPAK_DEST}/share/metainfo/com.lostflam.FlamQuencySync.metainfo.xml
+    sources:
+      - type: dir
+        path: ..

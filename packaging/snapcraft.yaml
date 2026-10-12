@@ -1,0 +1,60 @@
+name: flamquency-sync
+base: core24
+version: '0.1.0'
+summary: Terminal file sync with version control and rollback
+description: |
+  FlamQuency-Sync is a terminal-based file synchronization tool with real
+  version control, snapshots, and one-click rollback. Every version of your
+  files is stored in content-addressable blob storage. Back up to GitHub,
+  restore any file or the whole system to any point in time.
+
+  Features:
+  - Full sync with selective exclusions
+  - Real version control (SHA256 content-addressable storage)
+  - Full snapshots and one-button rollback
+  - GitHub cloud backend
+  - Textual TUI with arrow navigation
+  - CLI mode for scripting
+  - Watch mode for auto-sync
+  - Optional Fernet/AES encryption
+
+grade: stable
+confinement: strict
+compression: lzo
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  flamquency:
+    command: bin/flamquency
+    plugs:
+      - home
+      - removable-media
+      - network
+
+  flamquency-tui:
+    command: bin/flamquency-tui
+    plugs:
+      - home
+      - removable-media
+      - network
+
+parts:
+  flamquency-sync:
+    plugin: python
+    source: .
+    python-packages:
+      - rich
+      - PyYAML
+      - textual
+      - watchdog
+      - cryptography
+    build-packages:
+      - python3-dev
+      - gcc
+    stage-packages:
+      - python3
+      - git
+      - github-cli

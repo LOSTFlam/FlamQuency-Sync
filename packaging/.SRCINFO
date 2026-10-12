@@ -1,0 +1,25 @@
+pkgbase = flamquency-sync
+	pkgdesc = Terminal-based file synchronization with real version control, snapshots and one-click rollback
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/LOSTFlam/FlamQuency-Sync
+	arch = any
+	license = MIT
+	depends = python
+	depends = python-rich
+	depends = python-yaml
+	depends = python-textual
+	depends = python-watchdog
+	depends = python-cryptography
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-setuptools
+	makedepends = python-wheel
+	optdepends = github-cli: for GitHub cloud backend
+	optdepends = git: for GitHub cloud backend
+	provides = flamquency-sync
+	conflicts = flamquency-sync-git
+	source = flamquency-sync-0.1.0.tar.gz::https://github.com/LOSTFlam/FlamQuency-Sync/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = flamquency-sync

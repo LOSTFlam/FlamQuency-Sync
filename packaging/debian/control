@@ -1,0 +1,27 @@
+# Control file for flamquency-sync .deb package
+# Built by scripts/build-deb.sh
+
+Package: flamquency-sync
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: LOSTFlam <lostflam@users.noreply.github.com>
+Homepage: https://github.com/LOSTFlam/FlamQuency-Sync
+Description: Terminal-based file synchronization with version control
+ FlamQuency-Sync is a terminal-based file synchronization tool with real
+ version control, snapshots, and one-click rollback. Every version of your
+ files is stored in content-addressable blob storage, so you can restore
+ any file or the whole system to any point in time.
+ .
+ Features:
+  - Full sync with selective exclusions
+  - Real version control (SHA256 content-addressable storage)
+  - Full snapshots and one-button rollback
+  - GitHub cloud backend
+  - Textual TUI with arrow navigation
+  - CLI mode for scripting
+  - Watch mode for auto-sync
+  - Optional Fernet/AES encryption
+Depends: python3, python3-pip, git
+Recommends: github-cli

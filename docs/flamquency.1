@@ -1,0 +1,65 @@
+.TH FLAMQUENCY 1 "October 2026" "flamquency-sync 0.1.0" "User Commands"
+.SH NAME
+flamquency \- terminal-based file synchronization with version control
+.SH SYNOPSIS
+.B flamquency
+[\fI\,COMMAND\/\fR] [\fI\,OPTIONS\/\fR]
+.SH DESCRIPTION
+FlamQuency-Sync is a terminal-based file synchronization tool with real
+version control, snapshots, and one-click rollback. It stores every version
+of your files in content-addressable blob storage, can back up to GitHub,
+and offers both a Textual TUI and a scriptable CLI.
+.SH COMMANDS
+.TP
+.B sync
+Synchronize files according to configuration.
+.TP
+.B status
+Show current sync status.
+.TP
+.B snapshots
+List available snapshots.
+.TP
+.B rollback
+Rollback the whole system to a snapshot.
+.TP
+.B rollback-file
+Rollback a specific file to a chosen version.
+.TP
+.B diff
+Diff two versions of a text file.
+.TP
+.B watch
+Watch directories and auto-sync on changes.
+.TP
+.B config
+Show or edit configuration.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Show help and exit.
+.SH FILES
+.TP
+.I ~/.flamquency/config.yaml
+User configuration.
+.TP
+.I ~/.flamquency/sync/
+Local sync destination.
+.TP
+.I ~/.flamquency/versions/blobs/
+Content-addressable compressed blob storage.
+.SH EXAMPLES
+.TP
+Sync everything:
+.B flamquency sync
+.TP
+Rollback a single config file:
+.B flamquency rollback-file ~/.config/hypr/hyprland.conf \-\-version 2
+.TP
+Launch the TUI:
+.B flamquency-tui
+.SH SEE ALSO
+.BR flamquency-tui (1),
+https://github.com/LOSTFlam/FlamQuency-Sync
+.SH AUTHORS
+LOSTFlam

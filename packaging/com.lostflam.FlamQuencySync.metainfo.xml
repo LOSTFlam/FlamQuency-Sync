@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 LOSTFlam -->
+<component type="console-application">
+  <id>com.lostflam.FlamQuencySync</id>
+
+  <name>FlamQuency-Sync</name>
+  <summary>Terminal file sync with version control and rollback</summary>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <description>
+    <p>
+      FlamQuency-Sync is a terminal-based file synchronization tool with real
+      version control, snapshots, and one-click rollback. Every version of your
+      files is stored in content-addressable blob storage, so you can restore
+      any file or the whole system to any point in time.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Full sync with selective exclusions</li>
+      <li>Real version control (SHA256 content-addressable storage)</li>
+      <li>Full snapshots and one-button rollback</li>
+      <li>GitHub cloud backend</li>
+      <li>Textual TUI with arrow navigation</li>
+      <li>CLI mode for scripting</li>
+      <li>Watch mode for auto-sync</li>
+      <li>Optional Fernet/AES encryption</li>
+    </ul>
+  </description>
+
+  <categories>
+    <category>System</category>
+    <category>Utility</category>
+  </categories>
+
+  <url type="homepage">https://github.com/LOSTFlam/FlamQuency-Sync</url>
+  <url type="vcs-browser">https://github.com/LOSTFlam/FlamQuency-Sync</url>
+  <url type="bugtracker">https://github.com/LOSTFlam/FlamQuency-Sync/issues</url>
+
+  <launchable type="desktop-id">com.lostflam.FlamQuencySync.desktop</launchable>
+
+  <provides>
+    <binary>flamquency</binary>
+    <binary>flamquency-tui</binary>
+  </provides>
+</component>

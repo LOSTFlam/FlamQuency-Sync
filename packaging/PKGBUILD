@@ -1,0 +1,60 @@
+# Maintainer: LOSTFlam <lostflam@users.noreply.github.com>
+# Contributor: LOSTFlam <lostflam@users.noreply.github.com>
+
+pkgname=flamquency-sync
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Terminal-based file synchronization with real version control, snapshots and one-click rollback"
+arch=('any')
+url="https://github.com/LOSTFlam/FlamQuency-Sync"
+license=('MIT')
+depends=(
+    'python'
+    'python-rich'
+    'python-yaml'
+    'python-textual'
+    'python-watchdog'
+    'python-cryptography'
+)
+makedepends=(
+    'python-build'
+    'python-installer'
+    'python-setuptools'
+    'python-wheel'
+)
+optdepends=(
+    'github-cli: for GitHub cloud backend'
+    'git: for GitHub cloud backend'
+)
+provides=('flamquency-sync')
+conflicts=('flamquency-sync-git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+
+    # License
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    # Man page
+    install -Dm644 docs/flamquency.1 "$pkgdir/usr/share/man/man1/flamquency.1" 2>/dev/null || true
+
+    # Bash completion
+    install -Dm644 completions/flamquency.bash \
+        "$pkgdir/usr/share/bash-completion/completions/flamquency" 2>/dev/null || true
+
+    # Zsh completion
+    install -Dm644 completions/flamquency.zsh \
+        "$pkgdir/usr/share/zsh/site-functions/_flamquency" 2>/dev/null || true
+
+    # Fish completion
+    install -Dm644 completions/flamquency.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/flamquency.fish" 2>/dev/null || true
+}
