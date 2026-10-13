@@ -1,56 +1,35 @@
-# Bash completion for flamquency
+# Bash completion for flamquency — сгенерировано scripts/gen-completions.py
+# Перечитывает список команд напрямую у CLI, поэтому не устаревает.
 _flamquency() {
-    local cur prev opts
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        COMPREPLY=()
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    }
 
-    if [ "$COMP_CWORD" -eq 1 ]; then
-        opts="sync status snapshots rollback rollback-file diff watch config encryption ignore profile"
-        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+    if [ "$cword" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "sync rollback rollback-file restore-content view-content restore-tree schedule backend evolve status diff snapshots init prune check stats update watch config encryption ignore profile" -- "$cur") )
         return 0
     fi
 
-    case "${prev}" in
-        sync)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            return 0
-            ;;
-        --profile|-P)
-            COMPREPLY=( $(compgen -W "$(flamquency profile list 2>/dev/null | awk '/^ /{print $2}')" -- "${cur}") )
-            return 0
-            ;;
-        rollback)
-            COMPREPLY=( $(compgen -W "--snapshot --list" -- "${cur}") )
-            return 0
-            ;;
-        rollback-file)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            return 0
-            ;;
-        diff)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
-            return 0
-            ;;
-        watch)
-            COMPREPLY=( $(compgen -d -- "${cur}") )
-            return 0
-            ;;
-        config)
-            COMPREPLY=( $(compgen -W "--edit" -- "${cur}") )
-            return 0
-            ;;
+    case "${words[1]}" in
         profile)
-            COMPREPLY=( $(compgen -W "list create delete use show add-path remove-path describe --path --description --exclude" -- "${cur}") )
+            COMPREPLY=( $(compgen -W "$(flamquency profile list 2>/dev/null | awk '/^ /{{print $2}}')" -- "$cur") )
             return 0
             ;;
-        encryption|ignore)
-            COMPREPLY=( $(compgen -f -- "${cur}") )
+        backend)
+            COMPREPLY=( $(compgen -W "$(flamquency backend 2>/dev/null | awk '/^ +(→)? *[a-z]/{{print $NF}}' | head -8)" -- "$cur") )
             return 0
             ;;
+        snapshots)
+            COMPREPLY=( $(compgen -W "$(flamquency snapshots 2>/dev/null | awk '/^[0-9]+\./{{print $1}}')" -- "$cur") )
+            return 0
+            ;;
+        *) COMPREPLY=( $(compgen -f -- "$cur") ) ;;
     esac
-
-    COMPREPLY=( $(compgen -f -- "${cur}") )
     return 0
 }
 complete -F _flamquency flamquency

@@ -57,3 +57,33 @@ FLAMQUENCY_FIRE = Theme(
 
 # Для обратной совместимости со старым именем
 EMBER = FLAMQUENCY_FIRE
+
+
+def kaleido_theme(variant):
+    """Textual-тема для вариации «Калейдоскопа».
+
+    Вариации живут в kaleido.py, но Textual-тема строится здесь — рядом с
+    основной, чтобы структура токенов не разъезжалась между файлами.
+    Поверхности остаются тёмными: меняется только акцентная шкала.
+    """
+    from flamquency import kaleido
+    scale = kaleido.ACCENT_SCALES.get(variant)
+    if scale is None:
+        raise ValueError(f"Неизвестная вариация: {variant!r}")
+    ember, deep, accent, glow, warm, hot = scale
+    base = kaleido.BASE_SURFACES
+    return Theme(
+        name=f"flamquency-{variant}",
+        primary=accent,
+        secondary=warm,
+        accent=glow,
+        warning=base["warning"],
+        error=base["error"],
+        success=base["success"],
+        background=base["surface"],
+        surface=base["surface-raised"],
+        panel=base["surface-overlay"],
+        boost=accent,
+        dark=True,
+        variables=kaleido.palette(variant),
+    )

@@ -592,6 +592,234 @@ def cmd_backend(args):
     return 0
 
 
+def cmd_spark(args):
+    """«Огниво»: быстрые действия одной командой."""
+    from flamquency.spark import (
+        BUILTIN_SPARKS, SparkError, describe_sparks, get_spark,
+        remove_spark, run_spark, set_spark,
+    )
+    console = get_console()
+
+    if args.list or (not args.action and not args.remove):
+        rows = [(f"{icon('spark')} {name}", command, desc)
+                for name, command, desc in describe_sparks(load_config())]
+        console.print(card(
+            console, make_table(["Искра", "Команда", "Что делает"], rows),
+            title=f"{icon('spark')} «Огниво» — быстрые действия"))
+        console.print("[fq.faint]Запустить: flamquency spark ИМЯ · "
+                      "создать: flamquency spark set ИМЯ 'команда'[/]")
+        return 0
+
+    if args.action == "set":
+        config = load_config()
+        try:
+            spec = set_spark(config, args.name, args.value,
+                             description=getattr(args, "description", "") or "")
+        except SparkError as e:
+            console.print(error_panel(console, str(e)))
+            return 1
+        save_config(config)
+        console.print(success_panel(
+            console, f"«{args.name}» → {spec['command']}",
+            title="Искра создана", icon_name="spark"))
+        return 0
+
+    if args.action == "remove":
+        config = load_config()
+        try:
+            remove_spark(config, args.name)
+        except SparkError as e:
+            console.print(error_panel(console, str(e)))
+            return 1
+        save_config(config)
+        console.print(success_panel(
+            console, f"«{args.name}» удалена",
+            title="Искра убрана", icon_name="spark"))
+        return 0
+
+    if args.action == "show":
+        config = load_config()
+        try:
+            spec = get_spark(config, args.name)
+        except SparkError as e:
+            console.print(error_panel(console, str(e)))
+            return 1
+        console.print(card(
+            console, key_value([
+                ("Команда", spec.get("command", "")),
+                ("Описание", spec.get("description", "") or "—"),
+                ("Встроенная", "да" if args.name in BUILTIN_SPARKS else "нет"),
+            ]),
+            title=f"{icon('spark')} {args.name}"))
+        return 0
+
+    # Запуск
+    config = load_config()
+    if args.dry_run:
+        ok, command = run_spark(config, args.action, dry_run=True)
+        console.print(info_panel(console, command,
+                                 title="Что выполнится", icon_name="spark"))
+        return 0
+    console.print(f"[fq.label]{icon('spark')} Запускаю «{args.action}»...[/]")
+    ok, output = run_spark(config, args.action)
+    if not ok:
+        console.print(error_panel(console, output, title="Искра не вспыхнула"))
+        return 1
+    return 0
+
+
+def cmd_echo(args):
+    """«Эхо памяти»: что стоит взять под синк, судя по истории команд."""
+    from flamquency import memory_echo
+    console = get_console()
+    summary = memory_echo.summary(load_config())
+
+    if not summary["history_files"]:
+        console.print(info_panel(
+            console,
+            "Не нашёл истории оболочки (~/.zsh_history, ~/.bash_history, "
+            "fish). Всё вычисляется локально — ничего не отправляется.",
+            title=f"{icon('memory')} «Эхо памяти»", icon_name="memory"))
+        return 0
+
+    files = ", ".join(str(Path(p).name) for p in summary["history_files"])
+    rows = []
+    for path, hits, tracked in summary["suggestions"]:
+        mark = icon("success") if tracked else icon("lightbulb")
+        rows.append((f"{hits}×", f"{mark} {path}",
+                     "в профиле" if tracked else "можно добавить"))
+    console.print(card(
+        console, make_table(["Поподаний", "Путь", "Статус"], rows),
+        title=f"{icon('memory')} «Эхо памяти» — {files}"))
+
+    new = summary["new_candidates"]
+    if not new:
+        console.print("[fq.faint]Всё, над чем вы работаете, уже под синком.[/]")
+        return 0
+
+    if args.add:
+        for path, _hits, _tracked in new[:args.add]:
+            ok, msg = memory_echo.add_suggestion(load_config(), path)
+            if ok:
+                save_config(load_config())
+                console.print(f"   [fq.success]{icon('success')}[/] {msg}")
+            else:
+                console.print(f"   [fq.error]{icon('error')}[/] {msg}")
+        return 0
+
+    console.print("[fq.faint]Добавить в активный профиль: "
+                  "flamquency echo --add N (N — сколько штук)[/]")
+    return 0
+
+
+def cmd_kaleido(args):
+    """«Калейдоскоп»: цветовые вариации темы «Угольки»."""
+    from flamquency import kaleido
+    console = get_console()
+    config = load_config()
+    active = kaleido.current(config)
+
+    if args.random:
+        name, scale = kaleido.random_variant(seed=args.seed)
+        console.print(card(
+            console, _kaleido_preview(name, scale),
+            title=f"{icon('kaleido')} Случайная вариация — {name}"))
+        console.print("[fq.faint]Сохранить: flamquency kaleido use "
+                      f"{name}[/]")
+        return 0
+
+    if args.use:
+        try:
+            kaleido.set_variant(config, args.use)
+        except ValueError as e:
+            console.print(error_panel(console, str(e)))
+            return 1
+        save_config(config)
+        console.print(success_panel(
+            console, f"Тема «{kaleido.TITLES.get(args.use, args.use)}» "
+                     f"будет применена при следующем запуске TUI.",
+            title="Калейдоскоп повёрнут", icon_name="kaleido"))
+        return 0
+
+    rows = []
+    for name, title, accent in kaleido.describe():
+        mark = "→" if name == active else " "
+        swatch = _swatch(kaleido.ACCENT_SCALES[name])
+        rows.append((mark, f"{swatch} {name}", title, accent))
+    console.print(card(
+        console, make_table(["", "Вариация", "Характер", "Акцент"], rows),
+        title=f"{icon('kaleido')} «Калейдоскоп» — активна: {active}"))
+    console.print("[fq.faint]Переключить: flamquency kaleido use ИМЯ · "
+                  "случайная: flamquency kaleido --random[/]")
+    return 0
+
+
+def _swatch(scale):
+    """Цветные квадраты акцентной шкалы для таблицы."""
+    return "".join(f"[{c}]██[/]" for c in scale[:4])
+
+
+def _kaleido_preview(name, scale):
+    """Текстовый предпросмотр вариации: шкала + пример панели."""
+    ember, deep, accent, glow, warm, hot = scale
+    text = Text()
+    text.append("Шкала жары:  ", style="fq.label")
+    for color in scale:
+        text.append("█", style=color)
+    text.append("\n\nПример:  ", style="fq.label")
+    text.append("● активный элемент", style=accent)
+    text.append("   ")
+    text.append("успех", style=kaleido.BASE_SURFACES["success"])
+    text.append("   ")
+    text.append("ошибка", style=kaleido.BASE_SURFACES["error"])
+    text.append(f"\n\nАкцент: {accent} · ядро: {hot} · угли: {ember}",
+                style="fq.faint")
+    return text
+
+
+def cmd_help(args):
+    """Подробная справка по команде — зачем, примеры, связи."""
+    from flamquency.helptopics import HELP_TOPICS, topics
+    console = get_console()
+
+    if not args.topic:
+        # Обзор: команды с человеческим «зачем»
+        rows = []
+        for name, (why, _examples, related) in HELP_TOPICS.items():
+            rows.append((f"{icon('help')} {name}",
+                         why.split(".")[0] + "."))
+        console.print(card(
+            console, make_table(["Команда", "Зачем она"], rows),
+            title=f"{icon('help')} Справка FlamQuency-Sync"))
+        console.print(f"[fq.faint]Подробнее: flamquency help КОМАНДА "
+                      f"({len(topics())} команд описано)[/]")
+        return 0
+
+    topic = HELP_TOPICS.get(args.topic)
+    if topic is None:
+        known = ", ".join(topics())
+        console.print(error_panel(
+            console,
+            f"Нет справки по «{args.topic}».\nОписанные команды: {known}",
+            title="Неизвестная команда", icon_name="error"))
+        return 1
+
+    why, examples, related = topic
+    console.print(banner(console, f"flamquency {args.topic}", why,
+                         icon_name="help"))
+
+    example_lines = Text()
+    for example in examples:
+        example_lines.append(f"{icon('terminal')} ", style="fq.accent")
+        example_lines.append(example + "\n", style="fq.body")
+    console.print(card(console, example_lines, title="Примеры"))
+
+    if related:
+        links = " · ".join(f"flamquency help {r}" for r in related)
+        console.print(f"[fq.faint]{icon('arrow-right')} Смотри также: {links}[/]")
+    return 0
+
+
 def cmd_schedule(args):
     """Manage the sync schedule: show / set / remove."""
     from flamquency.scheduler import (
@@ -1583,7 +1811,13 @@ def _print_update_info(console, info):
             title="Обновлений нет", icon_name="success"))
 
 
-def main():
+def build_parser():
+    """Построить argparse-парсер CLI.
+
+    Вынесено из ``main()``, чтобы генератор completion-скриптов и любой
+    другой инструмент могли получить тот же список команд и флагов, не
+    запуская саму программу.
+    """
     parser = argparse.ArgumentParser(
         prog="flamquency",
         description=f"{icon('fire')} Terminal-based file synchronization with version control",
@@ -1684,6 +1918,41 @@ def main():
                        help="Cool down all file heat")
     p_evo.add_argument("--forget", nargs="+", metavar="PATH",
                        help="Forget these files' heat")
+
+    # spark
+    p_spark = subparsers.add_parser(
+        "spark", help="«Огниво» — run your own quick actions")
+    p_spark.add_argument("action", nargs="?",
+                         help="Spark name to run, or set/remove/show")
+    p_spark.add_argument("name", nargs="?", help="Spark name (for set/remove/show)")
+    p_spark.add_argument("value", nargs="?", help="Command (for set)")
+    p_spark.add_argument("--description", "-d", default="",
+                         help="Description for set")
+    p_spark.add_argument("--list", "-l", action="store_true",
+                         help="List all sparks")
+    p_spark.add_argument("--dry-run", action="store_true",
+                         help="Print the command without running it")
+
+    # echo
+    p_echo = subparsers.add_parser(
+        "echo", help="«Эхо памяти» — suggest paths to sync from shell history")
+    p_echo.add_argument("--add", type=int, metavar="N", default=0,
+                        help="Add the top N new candidates to the active profile")
+
+    # kaleido
+    p_kal = subparsers.add_parser(
+        "kaleido", help="«Калейдоскоп» — colour variations of the «Угольки» theme")
+    p_kal.add_argument("use", nargs="?", metavar="NAME",
+                       help="Activate this variation")
+    p_kal.add_argument("--random", action="store_true",
+                       help="Preview a random variation")
+    p_kal.add_argument("--seed", type=int,
+                       help="Seed for --random (reproducible)")
+
+    # help
+    p_help = subparsers.add_parser(
+        "help", help="Rich, detailed help for one command")
+    p_help.add_argument("topic", nargs="?", help="Command to explain")
 
     # status
     subparsers.add_parser("status", help="Show sync status")
@@ -1807,14 +2076,20 @@ def main():
                         metavar="PATTERN",
                         help="Extra exclude pattern for the profile (repeatable)")
 
+    return parser
+
+
+def main():
+    """Точка входа CLI: разобрать аргументы и запустить команду."""
+    parser = build_parser()
     args = parser.parse_args()
-    
+
     if not args.command:
         # Default to TUI
-        from flamquency.main import main
-        main()
+        from flamquency.main import main as tui_main
+        tui_main()
         return
-    
+
     commands = {
         "sync": cmd_sync,
         "rollback": cmd_rollback,
@@ -1825,6 +2100,10 @@ def main():
         "schedule": cmd_schedule,
         "backend": cmd_backend,
         "evolve": cmd_evolve,
+        "spark": cmd_spark,
+        "echo": cmd_echo,
+        "kaleido": cmd_kaleido,
+        "help": cmd_help,
         "status": cmd_status,
         "diff": cmd_diff,
         "snapshots": cmd_snapshots,
@@ -1839,7 +2118,7 @@ def main():
         "ignore": cmd_ignore,
         "profile": cmd_profile,
     }
-    
+
     handler = commands.get(args.command)
     if handler:
         sys.exit(handler(args))

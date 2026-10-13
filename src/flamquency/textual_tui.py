@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual import work
 
-from flamquency.theme import FLAMQUENCY_FIRE
+from flamquency.theme import FLAMQUENCY_FIRE, kaleido_theme
 from flamquency.icons import icon
 from flamquency.style import human_size, human_time
 
@@ -175,18 +175,41 @@ class SyncScreen(BaseScreen):
     @work(thread=True)
     def run_sync(self):
         result_widget = self.query_one("#sync-result", ResultPanel)
-        progress = self.query_one("#sync-progress", ProgressBar)
+        progress_bar = self.query_one("#sync-progress", ProgressBar)
         
         result_widget.update("⏳ Синхронизация...")
-        self.app.call_from_thread(progress.update, progress=10)
+        self.app.call_from_thread(progress_bar.update, progress=0)
         
         source_input = self.query_one("#source-input", Input)
         source_val = source_input.value.strip()
         source = Path(source_val).expanduser() if source_val else None
         
-        result = self.sync.sync(source=source)
+        def progress_callback(sync_progress):
+            """Real-time progress callback from sync engine."""
+            if sync_progress.total > 0:
+                pct = int(sync_progress.fraction * 100)
+                self.app.call_from_thread(
+                    progress_bar.update, 
+                    progress=pct
+                )
+                current = sync_progress.current
+                if current:
+                    name = Path(current).name
+                    if len(name) > 40:
+                        name = "…" + name[-37:]
+                    self.app.call_from_thread(
+                        result_widget.update,
+                        f"⏳ Синхронизация... {pct}% ({sync_progress.done}/{sync_progress.total})\n  [dim]{name}[/]"
+                    )
         
-        self.app.call_from_thread(progress.update, progress=100)
+        try:
+            result = self.sync.sync(source=source, progress=progress_callback)
+        except Exception as e:
+            self.app.call_from_thread(result_widget.update, 
+                f"[bold error]{icon('error')} Ошибка: {e}[/]")
+            return
+        
+        self.app.call_from_thread(progress_bar.update, progress=100)
         
         output = (
             f"[bold success]{icon('success')} Синхронизация завершена![/]\n\n"
@@ -202,7 +225,7 @@ class SyncScreen(BaseScreen):
             for e in result.errors[:5]:
                 output += f"  [error]{e}[/]\n"
         
-        result_widget.update(output)
+        self.app.call_from_thread(result_widget.update, output)
         
         # Обновить статус-бар
         try:
@@ -821,7 +844,15 @@ class FlamQuencyApp(App):
         self.sync = sync_engine
         # Тема регистрируется ДО парсинга CSS (иначе $surface-sunken не разрешится)
         self.register_theme(FLAMQUENCY_FIRE)
-        self.theme = "flamquency-fire"
+        # «Калейдоскоп»: если в конфиге выбрана вариация, регистрируем и её,
+        # чтобы ui.kaleido réelно влиял на TUI, а не только на CLI-превью.
+        from flamquency import kaleido
+        variant = kaleido.current(getattr(self.sync, "config", {}) or {})
+        if variant != kaleido.DEFAULT:
+            self.register_theme(kaleido_theme(variant))
+            self.theme = f"flamquency-{variant}"
+        else:
+            self.theme = "flamquency-fire"
     
     def on_mount(self):
         self.push_screen(DashboardScreen(self.sync))
