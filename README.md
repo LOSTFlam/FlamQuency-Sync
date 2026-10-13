@@ -31,6 +31,15 @@ Terminal-based file synchronization with real version control, snapshots, and on
 - **Content versioning** — `restore-content` / `view-content` / `restore-tree`:
   read or restore any version anywhere, whole directories at once, and a
   colour-coded `diff`
+- **Ignore by size and type** — `ignore --size-gt 1GB --types mp4,avi`; glob
+  rules answer *which*, size/type rules answer *how big* and *what kind*
+- **Spark** — `spark`: your own quick actions, one command each, three built in
+- **Memory echo** — `echo`: reads your shell history and suggests paths to sync
+- **Kaleidoscope** — `kaleido`: colour variations of the «Угольки» theme, same
+  readability, different character
+- **Rich help** — `help`: what a command is *for*, live examples, and links to
+  related commands; completions are generated from the CLI itself for bash,
+  zsh and fish
 - **Auto-update** — `flamquency update`: checks GitHub releases/git-tags, installs via pip or git
 - **Nerd Font icons** — no emoji; automatic ASCII fallback when the font is missing
 - **«Угольки» design system** — one palette for CLI and TUI, see docs/DESIGN.md

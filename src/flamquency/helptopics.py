@@ -73,7 +73,7 @@ HELP_TOPICS = {
         ["flamquency backend                       # список и живой статус",
          "flamquency backend check s3              # чего не хватает",
          "flamquency backend use smb               # переключиться"],
-        ["docs/BACKENDS.md", "status"],
+        ["status", "docs/BACKENDS.md"],
     ),
     "evolve": (
         "Программа смотрит, как вы работаете, и предлагает стать лучше: "
@@ -181,6 +181,42 @@ HELP_TOPICS = {
         ["flamquency config                        # показать",
          "flamquency config --edit"],
         [],
+    ),
+    "help": (
+        "Подробная справка по любой команде: зачем она, живые примеры и "
+        "связи с соседними командами. Полезнее, чем сухой --help.",
+        ["flamquency help                          # обзор всех команд",
+         "flamquency help restore-tree",
+         "flamquency help spark"],
+        [],
+    ),
+    "init": (
+        "Быстрый старт одной командой: конфиг, файл ignore и политика "
+        "хранения версий.",
+        ["flamquency init",
+         "flamquency init --keep-last 20 --git",
+         "flamquency init --skip-ignore"],
+        ["ignore", "prune", "profile"],
+    ),
+    "rollback": (
+        "Откатить всё к выбранному снапшоту целиком — когда правки пошли "
+        "не так и проще вернуться назад.",
+        ["flamquency rollback --list               # какие снапшоты есть",
+         "flamquency rollback --snapshot 3",
+         "flamquency rollback"],
+        ["rollback-file", "restore-tree", "snapshots"],
+    ),
+    "rollback-file": (
+        "Откатить только один файл к прошлой версии, не трогая остальное.",
+        ["flamquency rollback-file заметки.md      # список версий",
+         "flamquency rollback-file заметки.md --version 2",
+         "flamquency rollback-file заметки.md --list"],
+        ["restore-content", "view-content", "diff"],
+    ),
+    "snapshots": (
+        "Список снапшотов: когда сделан, сколько файлов внутри.",
+        ["flamquency snapshots"],
+        ["rollback", "prune", "stats"],
     ),
 }
 

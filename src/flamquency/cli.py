@@ -600,7 +600,7 @@ def cmd_spark(args):
     )
     console = get_console()
 
-    if args.list or (not args.action and not args.remove):
+    if args.list or (not args.action and not getattr(args, "remove", False)):
         rows = [(f"{icon('spark')} {name}", command, desc)
                 for name, command, desc in describe_sparks(load_config())]
         console.print(card(
@@ -724,19 +724,23 @@ def cmd_kaleido(args):
         console.print(card(
             console, _kaleido_preview(name, scale),
             title=f"{icon('kaleido')} Случайная вариация — {name}"))
-        console.print("[fq.faint]Сохранить: flamquency kaleido use "
+        console.print("[fq.faint]Сохранить: flamquency kaleido "
                       f"{name}[/]")
         return 0
 
-    if args.use:
+    # Принимаем обе формы: `kaleido magma` и `kaleido use magma`
+    target = args.use
+    if target == "use" and getattr(args, "use_name", None):
+        target = args.use_name
+    if target:
         try:
-            kaleido.set_variant(config, args.use)
+            kaleido.set_variant(config, target)
         except ValueError as e:
             console.print(error_panel(console, str(e)))
             return 1
         save_config(config)
         console.print(success_panel(
-            console, f"Тема «{kaleido.TITLES.get(args.use, args.use)}» "
+            console, f"Тема «{kaleido.TITLES.get(target, target)}» "
                      f"будет применена при следующем запуске TUI.",
             title="Калейдоскоп повёрнут", icon_name="kaleido"))
         return 0
@@ -1943,9 +1947,11 @@ def build_parser():
     p_kal = subparsers.add_parser(
         "kaleido", help="«Калейдоскоп» — colour variations of the «Угольки» theme")
     p_kal.add_argument("use", nargs="?", metavar="NAME",
-                       help="Activate this variation")
+                       help="Activate this variation (e.g. magma)")
+    p_kal.add_argument("use_name", nargs="?",
+                       help=argparse.SUPPRESS)  # вторая форма: use NAME
     p_kal.add_argument("--random", action="store_true",
-                       help="Preview a random variation")
+                       help="Preview a random variation instead")
     p_kal.add_argument("--seed", type=int,
                        help="Seed for --random (reproducible)")
 

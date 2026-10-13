@@ -11,7 +11,7 @@ _flamquency() {
     }
 
     if [ "$cword" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "sync rollback rollback-file restore-content view-content restore-tree schedule backend evolve status diff snapshots init prune check stats update watch config encryption ignore profile" -- "$cur") )
+        COMPREPLY=( $(compgen -W "sync rollback rollback-file restore-content view-content restore-tree schedule backend evolve spark echo kaleido help status diff snapshots init prune check stats update watch config encryption ignore profile" -- "$cur") )
         return 0
     fi
 

@@ -3,6 +3,7 @@
 import sys
 import os
 import copy
+import colorsys
 import tempfile
 import shutil
 import json
@@ -966,6 +967,320 @@ def test_bar_chart_and_sparkline():
     # прореживание до ширины
     assert len(sparkline(list(range(100)), width=32).plain) == 32
     print("✓ bar-чарт и sparkline рисуют тренды без выхода за границы")
+
+
+def test_spark_builtin_set_run_remove():
+    """Task 9: «Огниво» — встроенные искры, свои ярлыки, запуск."""
+    from flamquency.spark import (
+        BUILTIN_SPARKS, SparkError, describe_sparks, get_spark,
+        remove_spark, run_spark, set_spark,
+    )
+    config = {}
+
+    # три встроены сразу
+    actions = describe_sparks(config)
+    assert {name for name, _c, _d in actions} >= {"now", "check", "daily"}
+
+    # неизвестная искра — честная ошибка со списком
+    try:
+        get_spark(config, "нет-такой")
+        raise AssertionError("должно было упасть")
+    except SparkError as e:
+        assert "есть:" in str(e)
+
+    # свои искры переопределяют встроенные
+    set_spark(config, "деплой", "flamquency sync", description="развёртывание")
+    set_spark(config, "now", "flamquency check")          # переопределение
+    assert get_spark(config, "деплой")["command"] == "flamquency sync"
+    assert get_spark(config, "now")["command"] == "flamquency check"
+
+    # мусорные имена и пустые команды отбиваются
+    for bad_name in ("", "   ", "../побег", "a/b"):
+        try:
+            set_spark(config, bad_name, "flamquency sync")
+            raise AssertionError(f"должно было упасть: {bad_name!r}")
+        except SparkError:
+            pass
+    try:
+        set_spark(config, "пусто", "   ")
+        raise AssertionError("должно было упасть")
+    except SparkError:
+        pass
+
+    # встроенную удалить нельзя, свою — можно
+    try:
+        remove_spark(config, "check")
+        raise AssertionError("должно было упасть")
+    except SparkError as e:
+        assert "встроенная" in str(e)
+    remove_spark(config, "деплой")
+    try:
+        get_spark(config, "деплой")
+        raise AssertionError("должна была исчезнуть")
+    except SparkError:
+        pass
+
+    # dry-run печатает команду, ничего не выполняя
+    set_spark(config, "печать", "echo искра-сработала")
+    ok, command = run_spark(config, "печать", dry_run=True)
+    assert ok and command == "echo искра-сработала"
+
+    # реальный запуск дочернего процесса
+    ok, output = run_spark(config, "печать", capture=True)
+    assert ok, output
+    assert "искра-сработала" in output
+
+    # падающая команда → отчёт, а не исключение
+    set_spark(config, "провал", "sh -c 'exit 7'")
+    ok, message = run_spark(config, "провал", capture=True)
+    assert not ok and "7" in message
+    print("✓ «Огниво» создаёт, запускает и удаляет быстрые действия")
+
+
+def test_memory_echo_parses_history():
+    """Task 9: «Эхо памяти» разбирает историю и фильтрует шум."""
+    from flamquency import memory_echo as me
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        work = t / "work"
+        work.mkdir()
+        noise = t / "кэш"
+        noise.mkdir()
+        external = t / "внешнее"
+        external.mkdir()
+
+        # zsh-формат истории
+        history = t / ".zsh_history"
+        history.write_text(
+            f": 1710000000:0;cd {work}\n"
+            f": 1710000001:0;ls {work}\n"
+            f": 1710000002:0;cd {noise}\n"
+            f": 1710000003:0;cat /etc/hosts\n"
+            ": 1710000004:0;echo привет\n"
+        )
+        original = me.history_files
+        me.history_files = lambda: [history]
+        try:
+            commands = list(me._iter_commands(history))
+            assert len(commands) == 5
+            assert commands[0] == f"cd {work}"          # zsh-метка срезана
+
+            paths = me.extract_paths(commands)
+            assert paths[str(work)] >= 2
+            assert "/etc/hosts" not in paths            # файл не предлагаем
+
+            # suggestions требует минимума попаданий (3) — проверим с запасом
+            rows = me.suggestions({"profiles": {}})
+            assert rows == []                       # двух упоминаний мало
+            rows = me.suggestions({"profiles": {}}, min_hits=2)
+            assert rows and rows[0][0] == str(work)
+            assert rows[0][2] is False              # ещё не в профиле
+
+            # путь уже в профиле → помечается
+            rows = me.suggestions(
+                {"profiles": {"default": {"paths": [str(work)]}}},
+                min_hits=2)
+            assert rows and rows[0][2] is True
+
+            # файл (не каталог) в кандидаты не идёт
+            single = t / "одиночный.txt"
+            single.write_text("x")
+            one_line = t / ".bash_history"
+            one_line.write_text(f"cat {single}\n" * 5)
+            me.history_files = lambda: [one_line]
+            assert str(single) not in me.extract_paths(
+                list(me._iter_commands(one_line)))
+
+            # URL и сетевые пути — не кандидаты
+            urls = t / ".zsh_history"
+            urls.write_text(": 1:0;curl https://example.com/x\n"
+                            ": 2:0;git clone git@github.com:a/b.git\n")
+            me.history_files = lambda: [urls]
+            assert me.extract_paths(list(me._iter_commands(urls))) == {}
+
+            # bash-формат (без метки времени) тоже понимается
+            bash_history = t / ".bash_history"
+            bash_history.write_text(f"cd {work}\nls {work}\n")
+            me.history_files = lambda: [bash_history]
+            assert me.extract_paths(list(me._iter_commands(bash_history)))
+
+            # fish-формат
+            fish_history = t / "fish_history"
+            fish_history.write_text(f"- cmd: cd {work}\n- cmd: ls {work}\n")
+            me.history_files = lambda: [fish_history]
+            assert me.extract_paths(list(me._iter_commands(fish_history)))
+        finally:
+            me.history_files = original
+
+    # нет истории → пустая сводка, а не падение
+    original = me.history_files
+    me.history_files = lambda: []
+    try:
+        empty = me.summary({})
+    finally:
+        me.history_files = original
+    assert empty["suggestions"] == []
+    assert empty["history_files"] == []
+    print("✓ «Эхо памяти» читает историю оболочки и отфильтровывает шум")
+
+
+def test_memory_echo_add_to_profile():
+    """Task 9: «Эхо памяти» добавляет путь в активный профиль."""
+    from flamquency import memory_echo as me
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = Path(tmpdir)
+        work = t / "work"
+        work.mkdir()
+        config = {}
+
+        ok, msg = me.add_suggestion(config, str(work))
+        assert ok and str(work) in msg
+        assert str(work) in config["profiles"]["default"]["paths"]
+
+        # несуществующий путь не попадёт в профиль
+        ok, msg = me.add_suggestion(config, str(t / "нет"))
+        assert not ok and "не существует" in msg
+
+        # файл вместо каталога тоже отбивается
+        f = t / "файл.txt"
+        f.write_text("x")
+        ok, msg = me.add_suggestion(config, str(f))
+        assert not ok and "не каталог" in msg
+    print("✓ «Эхо памяти» добавляет только существующие каталоги")
+
+
+def test_kaleido_variants_and_theme():
+    """Task 9: «Калейдоскоп» — вариации темы остаются читаемыми."""
+    from flamquency import kaleido
+    from flamquency.theme import kaleido_theme
+
+    names = kaleido.variant_names()
+    assert "fire" in names and len(names) >= 4
+    assert kaleido.DEFAULT in names
+
+    for name in names:
+        palette = kaleido.palette(name)
+        # поверхности остаются тёмными, текст — светлым (доступность)
+        surface = palette["surface"]
+        text = palette["text"]
+        assert _luminance(surface) < 0.1, f"{name}: поверхности почернели"
+        assert _luminance(text) > 0.7, f"{name}: текст осветлел"
+        assert palette["accent"] != palette["accent-hot"]
+
+        # Textual-тема строится и несёт те же токены
+        theme = kaleido_theme(name)
+        assert theme.name == f"flamquency-{name}"
+        assert theme.variables["accent"] == palette["accent"]
+        assert theme.dark is True
+
+    # неизвестная вариация — отказ
+    for func in (kaleido.palette, kaleido_theme):
+        try:
+            func("нет-такой")
+            raise AssertionError("должно было упасть")
+        except ValueError:
+            pass
+
+    # поворот тона сохраняет светлоту и насыщенность
+    rotated = kaleido.rotate("fire", 180)
+    original = kaleido.ACCENT_SCALES["fire"]
+    assert len(rotated) == len(original)
+    for before, after in zip(original, rotated):
+        h1, l1, s1 = _hls(before)
+        h2, l2, s2 = _hls(after)
+        # светлота и насыщенность не двигаются
+        assert abs(l1 - l2) < 0.02, f"{before}: светлота поехала"
+        assert abs(s1 - s2) < 0.02, f"{before}: насыщенность поехала"
+        # тон сдвинут ровно на пол-круга (с поправкой на округление байт)
+        assert abs(abs(h2 - h1) - 0.5) < 0.03, f"{before}: тон не повернулся"
+
+    # случайная вариация воспроизводима по seed
+    assert kaleido.random_variant(seed=42) == kaleido.random_variant(seed=42)
+
+    # выбор запоминается в конфиге
+    config = {}
+    assert kaleido.current(config) == "fire"
+    kaleido.set_variant(config, "magma")
+    assert kaleido.current(config) == "magma"
+    assert config["ui"]["kaleido"] == "magma"
+    print("✓ «Калейдоскоп» поворачивает тему, сохраняя читаемость")
+
+
+def _hls(hex_color):
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return colorsys.rgb_to_hls(r, g, b)
+
+
+def _luminance(hex_color):
+    """Относительная яркость по WCAG — 0 (чёрный) … 1 (белый)."""
+    def channel(value):
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else \
+            ((value + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def test_help_topics_cover_commands():
+    """Task 8: справка описывает каждую команду с примерами."""
+    import argparse
+    from flamquency.helptopics import HELP_TOPICS, topics
+    from flamquency.cli import build_parser
+
+    # Все команды CLI описаны в справке
+    parser = build_parser()
+    subparsers = next(a for a in parser._actions
+                      if isinstance(a, argparse._SubParsersAction))
+    cli_commands = set(subparsers.choices)
+    assert cli_commands <= set(topics()), \
+        f"нет справки для: {sorted(cli_commands - set(topics()))}"
+
+    # У каждой темы есть «зачем» и хотя бы один пример
+    for name, (why, examples, related) in HELP_TOPICS.items():
+        assert why and len(why) > 20, f"{name}: описание слишком короткое"
+        assert examples, f"{name}: нет примеров"
+        # связи ведут на существующие темы или на документацию
+        for link in related:
+            assert link in HELP_TOPICS or "/" in link, \
+                f"{name} → {link}"
+
+    # help знает про новые команды v2.0
+    for new in ("spark", "echo", "kaleido", "evolve", "backend",
+                "schedule", "restore-tree"):
+        assert new in topics(), new
+    print(f"✓ справка описывает {len(topics())} команд с примерами и связями")
+
+
+def test_completions_generator_covers_commands():
+    """Task 8: генератор completion видит все команды из argparse."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "gen_completions",
+        Path(__file__).parent.parent / "scripts" / "gen-completions.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    commands = module.collect_commands()
+    names = [name for name, _ in commands]
+    for expected in ("sync", "backend", "evolve", "spark", "echo",
+                     "kaleido", "help", "schedule", "restore-tree"):
+        assert expected in names, expected
+
+    # help берётся из argparse, а не с последнего действия
+    helps = dict(commands)
+    assert "Synchronize" in helps["sync"]
+    assert "Rollback" in helps["rollback"]
+
+    # все три скрипта генерируются и содержат команды
+    bash = module.gen_bash(commands)
+    fish = module.gen_fish(commands)
+    zsh = module.gen_zsh(commands)
+    for script in (bash, fish, zsh):
+        assert "sync" in script
+    assert "backend" in bash and "backend" in fish
+    assert "profile list" in bash          # динамические подсказки
+    print(f"✓ генератор completion покрывает {len(names)} команд в 3 оболочках")
 
 
 def test_rollback_snapshot():
@@ -2289,6 +2604,12 @@ def main():
         test_global_rules_from_config,
         test_stats_by_type_top_and_timeline,
         test_bar_chart_and_sparkline,
+        test_spark_builtin_set_run_remove,
+        test_memory_echo_parses_history,
+        test_memory_echo_add_to_profile,
+        test_kaleido_variants_and_theme,
+        test_help_topics_cover_commands,
+        test_completions_generator_covers_commands,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,
