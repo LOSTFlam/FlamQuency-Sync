@@ -2,7 +2,7 @@
 # Contributor: LOSTFlam <lostflam@users.noreply.github.com>
 
 pkgname=flamquency-sync
-pkgver=0.1.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="Terminal-based file synchronization with real version control, snapshots and one-click rollback"
 arch=('any')

@@ -313,17 +313,44 @@ The backend will:
 
 ```
 flamquency/
-├── sync_engine.py       # Core sync engine
-├── version_store.py     # Content-addressable blob storage
+├── sync_engine.py       # Core sync engine: profiles, scan, snapshots, stats
+├── version_store.py     # Content-addressable blob storage + version history
 ├── encryption.py        # Fernet/AES blob encryption
-├── ignore.py            # .flamquencyignore (gitignore-style rules)
+├── ignore.py            # .flamquencyignore glob rules + size/type rules
 ├── profiles.py          # Sync profiles (named sets of paths)
+├── backends.py          # Backend registry: S3, SMB/NFS, rclone clouds
+├── cloud.py             # Backend abstraction (ABC) + LocalBackend
 ├── github_backend.py    # GitHub cloud backend
-├── cloud.py             # Backend abstraction
-├── config.py            # YAML configuration
+├── scheduler.py         # cron / Task Scheduler integration
+├── evolution.py         # «Эволюция» — self-learning on your habits
+├── spark.py             # «Огниво» — quick actions
+├── memory_echo.py       # «Эхо памяти» — shell history suggestions
+├── kaleido.py           # «Калейдоскоп» — theme variations
+├── helptopics.py        # Rich per-command help
+├── style.py             # CLI visuals (Rich) — «Угольки» palette, charts
+├── theme.py             # TUI theme (Textual) — same palette
+├── icons.py             # Nerd Font glyphs + ASCII fallback
 ├── textual_tui.py       # Textual TUI app
+├── tui.py               # Rich TUI (legacy)
 ├── cli.py               # CLI commands
-└── main.py              # Entry point
+├── main.py              # TUI entry point
+└── __init__.py          # __version__ — single source of truth
+```
+
+Two rules keep this honest:
+
+- **One palette, two renderers.** `style.py` (CLI) and `theme.py` (TUI)
+  describe the same «Угольки» tokens, and a test fails if they drift apart.
+- **Version lives in one place.** `__init__.py.__version__`; packaging reads it.
+  A test asserts the packaging files agree.
+
+## Development
+
+```bash
+uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt pytest
+PYTHONPATH=src .venv/bin/python tests/test_core.py     # 94 tests
+PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
+.venv/bin/python scripts/gen-completions.py             # after adding a command
 ```
 
 ## Data Layout

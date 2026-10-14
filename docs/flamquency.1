@@ -1,4 +1,4 @@
-.TH FLAMQUENCY 1 "October 2026" "flamquency-sync 0.1.0" "User Commands"
+.TH FLAMQUENCY 1 "October 2026" "flamquency-sync 2.0.0" "User Commands"
 .SH NAME
 flamquency \- terminal-based file synchronization with version control
 .SH SYNOPSIS
@@ -7,34 +7,118 @@ flamquency \- terminal-based file synchronization with version control
 .SH DESCRIPTION
 FlamQuency-Sync is a terminal-based file synchronization tool with real
 version control, snapshots, and one-click rollback. It stores every version
-of your files in content-addressable blob storage, can back up to GitHub,
-and offers both a Textual TUI and a scriptable CLI.
+of your files in content-addressable blob storage (compressed, optionally
+encrypted with Fernet/AES), can back up to a local folder, GitHub, any
+S3-compatible service, SMB/NFS shares, or Google Drive and Dropbox via
+rclone, and offers both a Textual TUI and a scriptable CLI.
+.PP
+Besides plain sync, v2.0 adds scheduling (cron / Task Scheduler), smart
+autosync with a quiet period, post-sync hooks, and a self-learning layer
+(\fBevolve\fR) that watches how you work and suggests improvements.
 .SH COMMANDS
 .TP
 .B sync
-Synchronize files according to configuration.
+Synchronize files according to configuration. Follows the active profile,
+an explicit \fB\-\-profile\fR, or a single \fB\-\-source\fR.
 .TP
 .B status
-Show current sync status.
+Show current sync status: last sync, backend, tracked files, encryption,
+active profile.
 .TP
 .B snapshots
 List available snapshots.
 .TP
 .B rollback
-Rollback the whole system to a snapshot.
+Rollback the whole system to a snapshot (\fB\-\-list\fR to see them).
 .TP
 .B rollback-file
 Rollback a specific file to a chosen version.
 .TP
-.B diff
-Diff two versions of a text file.
+.B restore-content \fIFILE\fR [\fB\-\-version\fR N] [\fB\-\-output\fR PATH]
+Restore the content of one version to any path, leaving the original alone.
+.TP
+.B view-content \fIFILE\fR [\fB\-\-version\fR N] [\fB\-\-max-bytes\fR N]
+Print a version's content without restoring anything.
+.TP
+.B restore-tree [\fIPATH\fR] [\fB\-\-profile\fR NAME] [\fB\-\-output\fR DIR]
+Restore a whole directory, a profile, or the entire store at one version.
+.TP
+.B diff \fIFILE\fR \fB\-\-v1\fR N \fB\-\-v2\fR N
+Diff two versions of a text file, colour-coded, with an added/removed count.
+.TP
+.B stats [\fB\-\-graphs\fR] [\fB\-\-by-type\fR] [\fB\-\-top\fR N]
+Storage statistics: dedup ratio, saved space, per-type bar chart,
+top-changed files, and a storage growth sparkline.
+.TP
+.B check
+Verify blob store integrity.
+.TP
+.B prune
+Prune old snapshots with restic-style retention (\fB\-\-keep-last\fR,
+\fB\-\-keep-daily\fR, \fB\-\-keep-within\fR, \fB\-\-dry-run\fR).
+.TP
+.B profile
+Manage sync profiles: named sets of paths (list, create, delete, use,
+show, add-path, remove-path, describe).
+.TP
+.B ignore
+Manage \fI~/.flamquencyignore\fR: glob rules plus global \fB\-\-size-gt\fR /
+\fB\-\-size-lt\fR / \fB\-\-types\fR rules. \fB\-\-check\fR PATH explains which
+rule decided.
+.TP
+.B backend
+Manage storage backends: \fBlist\fR, \fBcheck\fR, \fBuse\fR. Secrets live in
+environment variables, never in the config.
+.TP
+.B schedule [\fIINTERVAL\fR] [\fB\-\-profile\fR NAME] [\fB\-\-remove\fR]
+Set up a recurring sync. Accepts human intervals ("каждый час",
+"каждые 30 минут", "daily") or a raw cron expression.
+.TP
+.B evolve [\fB\-\-apply\fR] [\fB\-\-decay\fR] [\fB\-\-forget\fR PATH...]
+Self-learning layer: shows or applies suggestions (hot files, new profiles,
+shortcuts) based on how you work.
+.TP
+.B spark
+Quick actions in one command (\fBset\fR, \fBremove\fR, \fBshow\fR,
+\fB\-\-list\fR, \fB\-\-dry-run\fR). Three are built in.
+.TP
+.B echo [\fB\-\-add\fR N]
+Read your shell history and suggest paths worth syncing. Everything is
+computed locally.
+.TP
+.B kaleido [\fINAME\fR] [\fB\-\-random\fR]
+Colour variations of the "Угольки" theme.
+.TP
+.B encryption
+Manage blob encryption: status, enable, disable, change-password.
+.TP
+.B update [\fB\-\-check\fR] [\fB\-\-yes\fR]
+Check for and install updates from GitHub.
 .TP
 .B watch
-Watch directories and auto-sync on changes.
+Watch directories and auto-sync on changes (smart quiet period).
 .TP
-.B config
+.B config [\fB\-\-edit\fR]
 Show or edit configuration.
+.TP
+.B help [\fICOMMAND\fR]
+Detailed help: what a command is for, live examples, related commands.
 .SH OPTIONS
+.TP
+.B \-\-profile, \-P \fINAME\fR
+Sync this profile instead of the active one (sync, restore-tree, schedule).
+.TP
+.B \-\-password, \-p
+Blob store password (else the FLAMQUENCY_PASSWORD environment variable).
+.TP
+.B \-\-source, \-s \fIPATH\fR
+Sync a single directory, bypassing profiles.
+.TP
+.B \-\-yes, \-y
+Skip confirmation prompts.
+.TP
+.B \-\-dry-run
+Preview an action without performing it.
 .TP
 .B \-h, \-\-help
 Show help and exit.
@@ -43,18 +127,58 @@ Show help and exit.
 .I ~/.flamquency/config.yaml
 User configuration.
 .TP
+.I ~/.flamquencyignore
+gitignore-style exclusion rules, plus size/type rules.
+.TP
 .I ~/.flamquency/sync/
 Local sync destination.
 .TP
 .I ~/.flamquency/versions/blobs/
 Content-addressable compressed blob storage.
+.TP
+.I ~/.flamquency/versions/files/
+Per-file version history.
+.TP
+.I ~/.flamquency/snapshots/
+Snapshot manifests.
+.TP
+.I ~/.flamquency/schedule.json
+The schedule FlamQuency believes is installed.
+.SH ENVIRONMENT
+.TP
+.B FLAMQUENCY_PASSWORD
+Blob store password, so scripts never prompt.
+.TP
+.B FLAMQUENCY_S3_ACCESS_KEY, FLAMQUENCY_S3_SECRET_KEY
+S3 credentials (only when the s3 backend is active).
+.TP
+.B FLAMQUENCY_GITHUB_TOKEN
+GitHub token for the github backend.
+.TP
+.B FLAMQUENCY_SMB_USER, FLAMQUENCY_SMB_PASSWORD
+SMB share credentials.
 .SH EXAMPLES
 .TP
 Sync everything:
 .B flamquency sync
 .TP
+Read what a file looked like two versions ago:
+.B flamquency view-content notes.md \-\-version 1
+.TP
+Restore a whole directory into a scratch folder first:
+.B flamquency restore-tree docs \-\-output /tmp/проверка
+.TP
 Rollback a single config file:
 .B flamquency rollback-file ~/.config/hypr/hyprland.conf \-\-version 2
+.TP
+Schedule an hourly sync of one profile:
+.B flamquency schedule "каждый час" \-\-profile work
+.TP
+Never sync files over a gigabyte, or any video:
+.B flamquency ignore \-\-size-gt 1GB \-\-types mp4,avi,mkv
+.TP
+See what the self-learning layer suggests:
+.B flamquency evolve
 .TP
 Launch the TUI:
 .B flamquency-tui

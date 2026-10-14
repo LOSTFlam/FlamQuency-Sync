@@ -16,7 +16,8 @@ def main():
     config = load_config()
 
     if "__version__" not in config:
-        config["__version__"] = "0.1.0"
+        from flamquency import __version__
+        config["__version__"] = __version__
 
     backend_type = config.get("cloud_backend", "local")
     if backend_type == "local":

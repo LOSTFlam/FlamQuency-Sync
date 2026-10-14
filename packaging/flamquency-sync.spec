@@ -1,7 +1,7 @@
-%global pkgversion 0.1.0
+%global pkgversion 2.0.0
 
 Name:           flamquency-sync
-Version:        0.1.0
+Version:        2.0.0
 Release:        1%{?dist}
 Summary:        Terminal-based file synchronization with version control
 License:        MIT

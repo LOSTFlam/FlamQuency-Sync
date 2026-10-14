@@ -9,6 +9,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from flamquency import __version__
+
 console = Console()
 
 class FlamQuencyTUI:
@@ -24,7 +26,9 @@ class FlamQuencyTUI:
     def draw_header(self):
         from flamquency.icons import icon as _icon
         title = Text(f"{_icon('fire')} FlamQuency-Sync", style="bold cyan")
-        version = Text(f"v{self.sync.config.get('__version__', '0.1.0')}", style="dim")
+        version = Text(
+            f"v{self.sync.config.get('__version__', __version__)}",
+            style="dim")
         header = Panel(title + " " + version, border_style="cyan")
         console.print(header)
         console.print()
@@ -229,7 +233,7 @@ class FlamQuencyTUI:
         self.clear()
         self.draw_header()
         console.print(f"[bold]{_icon('fire')} FlamQuency-Sync[/bold]")
-        console.print("Version 0.1.0")
+        console.print(f"Version {__version__}")
         console.print("Terminal-based file synchronization with real versioning")
         console.print("\nFeatures:")
         console.print("  • Content-addressable blob storage (SHA256)")

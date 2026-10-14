@@ -1283,6 +1283,40 @@ def test_completions_generator_covers_commands():
     print(f"✓ генератор completion покрывает {len(names)} команд в 3 оболочках")
 
 
+def test_version_is_single_source_of_truth():
+    """Версия живёт в __init__.py, упаковка её читает — и они согласованы."""
+    from flamquency import __version__
+    import re
+    repo = Path(__file__).parent.parent
+
+    # setup.py читает версию из __init__.py, а не держит копию
+    setup_src = (repo / "setup.py").read_text()
+    assert "read_version()" in setup_src
+    assert '__version__ = "0.1.0"' not in setup_src
+
+    # Файлы упаковки, которым функция не поможет, обязаны совпадать
+    targets = {
+        "packaging/PKGBUILD": r"^pkgver=([0-9.]+)$",
+        "packaging/snapcraft.yaml": r"^version:\s*'([0-9.]+)'$",
+        "packaging/flamquency-sync.spec": r"^%global pkgversion\s+([0-9.]+)$",
+    }
+    for rel, pattern in targets.items():
+        text = (repo / rel).read_text()
+        match = re.search(pattern, text, re.MULTILINE)
+        assert match, f"не нашёл версию в {rel}"
+        assert match.group(1) == __version__, \
+            f"{rel}: {match.group(1)} != {__version__}"
+
+    # В коде не осталось захардкоженных старых версий
+    for py in (repo / "src" / "flamquency").glob("*.py"):
+        text = py.read_text()
+        assert '"0.1.0"' not in text, f"{py.name}: захардкожена 0.1.0"
+
+    # Версия семантическая — её парсят apt/rpm/pip и updater
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__), __version__
+    print(f"✓ версия {__version__} — единый источник правды для кода и упаковки")
+
+
 def test_rollback_snapshot():
     with tempfile.TemporaryDirectory() as tmpdir:
         sync = _isolated_sync(tmpdir)
@@ -2610,6 +2644,7 @@ def main():
         test_kaleido_variants_and_theme,
         test_help_topics_cover_commands,
         test_completions_generator_covers_commands,
+        test_version_is_single_source_of_truth,
         test_version_listing,
         test_gc_and_prune,
         test_backend_factory,

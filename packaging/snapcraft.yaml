@@ -1,6 +1,6 @@
 name: flamquency-sync
 base: core24
-version: '0.1.0'
+version: '2.0.0'
 summary: Terminal file sync with version control and rollback
 description: |
   FlamQuency-Sync is a terminal-based file synchronization tool with real
